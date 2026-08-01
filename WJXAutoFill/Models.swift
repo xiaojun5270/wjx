@@ -228,7 +228,11 @@ final class RuleStore: ObservableObject {
     }
 
     var surveyURL: URL? {
-        guard let url = URL(string: surveyURLString.trimmingCharacters(in: .whitespacesAndNewlines)),
+        Self.validatedSurveyURL(from: surveyURLString)
+    }
+
+    static func validatedSurveyURL(from value: String) -> URL? {
+        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
               let host = url.host?.lowercased(),
               url.scheme == "https",
               host == "wjx.cn" || host.hasSuffix(".wjx.cn") else {
@@ -377,5 +381,137 @@ final class RuleStore: ObservableObject {
         }
 
         return SubmissionPreset(id: preset.id, name: "预设 \(slot)", rules: rules)
+    }
+}
+
+final class SurveyPageSession: ObservableObject, Identifiable {
+    let id: UUID
+    @Published var title: String
+    @Published var surveyURLString: String
+    @Published var selectedPresetID: UUID
+    @Published var autoFillOnLoad: Bool
+    @Published var autoSubmitAfterFill: Bool
+    @Published var submitDelaySeconds: Int
+    let controller: SurveyWebController
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        surveyURLString: String,
+        selectedPresetID: UUID,
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int,
+        controller: SurveyWebController = SurveyWebController()
+    ) {
+        self.id = id
+        self.title = title
+        self.surveyURLString = surveyURLString
+        self.selectedPresetID = selectedPresetID
+        self.autoFillOnLoad = autoFillOnLoad
+        self.autoSubmitAfterFill = autoSubmitAfterFill
+        self.submitDelaySeconds = submitDelaySeconds
+        self.controller = controller
+    }
+
+    var surveyURL: URL? {
+        RuleStore.validatedSurveyURL(from: surveyURLString)
+    }
+}
+
+final class SurveyWorkspace: ObservableObject {
+    static let maximumPageCount = 4
+
+    @Published private(set) var pages: [SurveyPageSession]
+    @Published var selectedPageID: UUID?
+
+    init(
+        defaultURLString: String,
+        defaultPresetID: UUID,
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        let firstPage = SurveyPageSession(
+            title: "页面 1",
+            surveyURLString: defaultURLString,
+            selectedPresetID: defaultPresetID,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+        pages = [firstPage]
+        selectedPageID = firstPage.id
+    }
+
+    var selectedPage: SurveyPageSession? {
+        guard let selectedPageID else { return pages.first }
+        return pages.first { $0.id == selectedPageID } ?? pages.first
+    }
+
+    var canAddPage: Bool {
+        pages.count < Self.maximumPageCount
+    }
+
+    @discardableResult
+    func addPage(
+        defaultURLString: String,
+        defaultPresetID: UUID,
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) -> SurveyPageSession? {
+        guard canAddPage else { return nil }
+        let page = SurveyPageSession(
+            title: nextPageTitle(),
+            surveyURLString: defaultURLString,
+            selectedPresetID: defaultPresetID,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+        pages.append(page)
+        selectedPageID = page.id
+        return page
+    }
+
+    @discardableResult
+    func duplicateSelectedPage() -> SurveyPageSession? {
+        guard canAddPage, let selectedPage else { return nil }
+        let page = SurveyPageSession(
+            title: nextPageTitle(),
+            surveyURLString: selectedPage.surveyURLString,
+            selectedPresetID: selectedPage.selectedPresetID,
+            autoFillOnLoad: selectedPage.autoFillOnLoad,
+            autoSubmitAfterFill: selectedPage.autoSubmitAfterFill,
+            submitDelaySeconds: selectedPage.submitDelaySeconds
+        )
+        pages.append(page)
+        selectedPageID = page.id
+        return page
+    }
+
+    func closePage(_ pageID: UUID) {
+        guard pages.count > 1,
+              let index = pages.firstIndex(where: { $0.id == pageID }) else { return }
+
+        let page = pages[index]
+        page.controller.shutdown()
+        pages.remove(at: index)
+
+        if selectedPageID == pageID {
+            let nextIndex = min(index, pages.count - 1)
+            selectedPageID = pages[nextIndex].id
+        }
+    }
+
+    private func nextPageTitle() -> String {
+        for number in 1...Self.maximumPageCount {
+            let candidate = "页面 \(number)"
+            if !pages.contains(where: { $0.title == candidate }) {
+                return candidate
+            }
+        }
+        return "新页面"
     }
 }

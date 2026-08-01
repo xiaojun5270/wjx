@@ -80,6 +80,19 @@ final class SurveyWebController: ObservableObject {
         logs.removeAll()
     }
 
+    func shutdown() {
+        cancelPendingAutoSubmit()
+        cancelScheduledBatch(logCancellation: false)
+        pendingScheduledBatch = nil
+        if let runID = parallelRunID,
+           let script = AutomationScript.cancelParallel(runID: runID) {
+            webView?.evaluateJavaScript(script)
+        }
+        clearQueueSession()
+        webView?.stopLoading()
+        webView = nil
+    }
+
     func reload() {
         cancelPendingAutoSubmit()
         if !isQueueRunning {

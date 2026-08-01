@@ -2,6 +2,257 @@ import Foundation
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var store: RuleStore
+    @StateObject private var workspace: SurveyWorkspace
+    @State private var showingCompactSidebar = false
+    @State private var pagePendingClose: UUID?
+
+    init() {
+        let store = RuleStore()
+        _store = StateObject(wrappedValue: store)
+        _workspace = StateObject(
+            wrappedValue: SurveyWorkspace(
+                defaultURLString: store.surveyURLString,
+                defaultPresetID: store.selectedPresetID,
+                autoFillOnLoad: store.autoFillOnLoad,
+                autoSubmitAfterFill: store.autoSubmitAfterFill,
+                submitDelaySeconds: store.submitDelaySeconds
+            )
+        )
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let usesPersistentSidebar = proxy.size.width >= 700
+
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
+                    if usesPersistentSidebar {
+                        pageSidebar(isCompact: false)
+                            .frame(width: 250)
+                        Divider()
+                    }
+
+                    pageStack(showsSidebarButton: !usesPersistentSidebar)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                if !usesPersistentSidebar, showingCompactSidebar {
+                    Color.black.opacity(0.24)
+                        .ignoresSafeArea()
+                        .onTapGesture { showingCompactSidebar = false }
+
+                    pageSidebar(isCompact: true)
+                        .frame(width: min(proxy.size.width * 0.82, 310))
+                        .background(Color(uiColor: .systemGroupedBackground))
+                        .transition(.move(edge: .leading))
+                        .shadow(color: .black.opacity(0.18), radius: 18, x: 8)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: showingCompactSidebar)
+            .onChange(of: usesPersistentSidebar) { isPersistent in
+                if isPersistent { showingCompactSidebar = false }
+            }
+        }
+        .confirmationDialog(
+            "关闭页面？",
+            isPresented: Binding(
+                get: { pagePendingClose != nil },
+                set: { if !$0 { pagePendingClose = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("关闭页面", role: .destructive) {
+                guard let pagePendingClose else { return }
+                workspace.closePage(pagePendingClose)
+                self.pagePendingClose = nil
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("该页面的定时、填写和后台任务将停止。其他页面不受影响。")
+        }
+    }
+
+    private func pageStack(showsSidebarButton: Bool) -> some View {
+        ZStack {
+            ForEach(workspace.pages) { page in
+                SurveyPageView(
+                    session: page,
+                    store: store,
+                    isSelected: workspace.selectedPageID == page.id,
+                    showsSidebarButton: showsSidebarButton,
+                    onShowSidebar: { showingCompactSidebar = true }
+                )
+                .opacity(workspace.selectedPageID == page.id ? 1 : 0)
+                .allowsHitTesting(workspace.selectedPageID == page.id)
+                .accessibilityHidden(workspace.selectedPageID != page.id)
+                .zIndex(workspace.selectedPageID == page.id ? 1 : 0)
+            }
+        }
+    }
+
+    private func pageSidebar(isCompact: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("页面")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+
+                Menu {
+                    Button {
+                        addPage(copyCurrent: false, closesSidebar: isCompact)
+                    } label: {
+                        Label("新建页面", systemImage: "plus")
+                    }
+
+                    Button {
+                        addPage(copyCurrent: true, closesSidebar: isCompact)
+                    } label: {
+                        Label("复制当前页面", systemImage: "doc.on.doc")
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 32, height: 32)
+                }
+                .disabled(!workspace.canAddPage)
+                .help("添加页面")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(workspace.pages) { page in
+                        SurveyPageSidebarRow(
+                            page: page,
+                            isSelected: workspace.selectedPageID == page.id,
+                            canClose: workspace.pages.count > 1,
+                            onSelect: {
+                                workspace.selectedPageID = page.id
+                                if isCompact { showingCompactSidebar = false }
+                            },
+                            onClose: { pagePendingClose = page.id }
+                        )
+                    }
+                }
+                .padding(8)
+            }
+
+            Divider()
+            HStack {
+                Image(systemName: "rectangle.stack")
+                Text("\(workspace.pages.count) / \(SurveyWorkspace.maximumPageCount)")
+                    .font(.caption.monospacedDigit())
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .frame(maxHeight: .infinity)
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private func addPage(copyCurrent: Bool, closesSidebar: Bool) {
+        if copyCurrent {
+            workspace.duplicateSelectedPage()
+        } else {
+            workspace.addPage(
+                defaultURLString: store.surveyURLString,
+                defaultPresetID: store.selectedPresetID,
+                autoFillOnLoad: store.autoFillOnLoad,
+                autoSubmitAfterFill: store.autoSubmitAfterFill,
+                submitDelaySeconds: store.submitDelaySeconds
+            )
+        }
+        if closesSidebar { showingCompactSidebar = false }
+    }
+}
+
+private struct SurveyPageSidebarRow: View {
+    @ObservedObject var page: SurveyPageSession
+    @ObservedObject private var controller: SurveyWebController
+    let isSelected: Bool
+    let canClose: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    init(
+        page: SurveyPageSession,
+        isSelected: Bool,
+        canClose: Bool,
+        onSelect: @escaping () -> Void,
+        onClose: @escaping () -> Void
+    ) {
+        _page = ObservedObject(wrappedValue: page)
+        _controller = ObservedObject(wrappedValue: page.controller)
+        self.isSelected = isSelected
+        self.canClose = canClose
+        self.onSelect = onSelect
+        self.onClose = onClose
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 8, height: 8)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(page.title)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+                Text(page.surveyURL?.host ?? "地址未设置")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 4)
+
+            if canClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("关闭\(page.title)")
+                .help("关闭页面")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 52)
+        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+    }
+
+    private var statusColor: Color {
+        if controller.scheduledBatchTarget != nil { return .orange }
+        if controller.isBusy { return .blue }
+        switch controller.queueState {
+        case .completed:
+            return controller.queueSnapshot.failed == 0 ? .green : .orange
+        case .stopped:
+            return .orange
+        case .idle, .running:
+            break
+        }
+        switch controller.state {
+        case .ready, .submitted: return .green
+        case .captchaRequired: return .orange
+        case .closed, .failed: return .red
+        case .loading: return .secondary
+        }
+    }
+}
+
+private struct SurveyPageView: View {
     private enum ConfirmationAction {
         case singleSubmit
         case prepareBatch
@@ -9,27 +260,46 @@ struct ContentView: View {
         case submitPreparedBatch
     }
 
-    @StateObject private var store = RuleStore()
-    @StateObject private var webController = SurveyWebController()
+    @ObservedObject var session: SurveyPageSession
+    @ObservedObject var store: RuleStore
+    @ObservedObject private var webController: SurveyWebController
+    let isSelected: Bool
+    let showsSidebarButton: Bool
+    let onShowSidebar: () -> Void
     @State private var showingRules = false
     @State private var showingLogs = false
     @State private var showingConfirmation = false
     @State private var confirmationAction: ConfirmationAction = .singleSubmit
 
+    init(
+        session: SurveyPageSession,
+        store: RuleStore,
+        isSelected: Bool,
+        showsSidebarButton: Bool,
+        onShowSidebar: @escaping () -> Void
+    ) {
+        _session = ObservedObject(wrappedValue: session)
+        _store = ObservedObject(wrappedValue: store)
+        _webController = ObservedObject(wrappedValue: session.controller)
+        self.isSelected = isSelected
+        self.showsSidebarButton = showsSidebarButton
+        self.onShowSidebar = onShowSidebar
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if let url = store.surveyURL {
+                if let url = session.surveyURL {
                     VStack(spacing: 0) {
                         statusHeader
                         Divider()
                         SurveyWebView(
                             controller: webController,
                             url: url,
-                            rules: store.selectedPreset?.rules ?? [],
-                            autoFillOnLoad: store.autoFillOnLoad,
-                            autoSubmitAfterFill: store.autoSubmitAfterFill,
-                            submitDelaySeconds: store.submitDelaySeconds
+                            rules: selectedPreset?.rules ?? [],
+                            autoFillOnLoad: session.autoFillOnLoad,
+                            autoSubmitAfterFill: session.autoSubmitAfterFill,
+                            submitDelaySeconds: session.submitDelaySeconds
                         )
                     }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -39,11 +309,24 @@ struct ContentView: View {
                     invalidURLView
                 }
             }
-            .navigationTitle("问卷助手")
+            .navigationTitle(session.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { browserToolbar }
             .sheet(isPresented: $showingRules) {
-                RuleEditorView(store: store)
+                RuleEditorView(
+                    store: store,
+                    surveyURLString: Binding(
+                        get: { session.surveyURLString },
+                        set: {
+                            session.surveyURLString = $0
+                            store.surveyURLString = $0
+                        }
+                    ),
+                    selectedPresetID: selectedPresetIDBinding,
+                    autoFillOnLoad: autoFillOnLoadBinding,
+                    autoSubmitAfterFill: autoSubmitAfterFillBinding,
+                    submitDelaySeconds: submitDelaySecondsBinding
+                )
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingLogs) {
@@ -60,7 +343,7 @@ struct ContentView: View {
             } message: {
                 Text(confirmationMessage)
             }
-            .alert(item: $webController.notice) { notice in
+            .alert(item: visibleNoticeBinding) { notice in
                 Alert(
                     title: Text(notice.title),
                     message: Text(notice.message),
@@ -70,9 +353,23 @@ struct ContentView: View {
         }
     }
 
+    private var visibleNoticeBinding: Binding<UserNotice?> {
+        Binding(
+            get: { isSelected ? webController.notice : nil },
+            set: { webController.notice = $0 }
+        )
+    }
+
     @ToolbarContentBuilder
     private var browserToolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarLeading) {
+        ToolbarItemGroup(placement: .navigationBarLeading) {
+            if showsSidebarButton {
+                Button(action: onShowSidebar) {
+                    Image(systemName: "sidebar.left")
+                }
+                .help("页面菜单")
+            }
+
             Button {
                 webController.goBack()
             } label: {
@@ -88,7 +385,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .disabled(store.surveyURL == nil || webController.isBusy)
+            .disabled(session.surveyURL == nil || webController.isBusy)
             .help("重新加载")
 
             Button {
@@ -180,7 +477,7 @@ struct ContentView: View {
     private var presetAndLogRow: some View {
         HStack(spacing: 10) {
             Menu {
-                Picker("当前预设", selection: $store.selectedPresetID) {
+                Picker("当前预设", selection: selectedPresetIDBinding) {
                     ForEach(store.presets) { preset in
                         Label(
                             preset.name,
@@ -192,9 +489,9 @@ struct ContentView: View {
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "person.text.rectangle")
-                    Text(store.selectedPreset?.name ?? "选择预设")
+                    Text(selectedPreset?.name ?? "选择预设")
                         .font(.subheadline.weight(.medium))
-                    Text("\(store.selectedPreset?.completedFieldCount ?? 0)/3")
+                    Text("\(selectedPreset?.completedFieldCount ?? 0)/3")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     Image(systemName: "chevron.up.chevron.down")
@@ -236,13 +533,13 @@ struct ContentView: View {
         VStack(spacing: 9) {
             HStack(spacing: 10) {
                 Button {
-                    if store.autoSubmitAfterFill {
+                    if session.autoSubmitAfterFill {
                         webController.fillAndSubmit(
-                            rules: store.selectedPreset?.rules ?? [],
-                            submitDelaySeconds: store.submitDelaySeconds
+                            rules: selectedPreset?.rules ?? [],
+                            submitDelaySeconds: session.submitDelaySeconds
                         )
                     } else {
-                        webController.fill(rules: store.selectedPreset?.rules ?? [])
+                        webController.fill(rules: selectedPreset?.rules ?? [])
                     }
                 } label: {
                     Label(fillButtonTitle, systemImage: "wand.and.stars")
@@ -422,7 +719,7 @@ struct ContentView: View {
             }
         case .prepareBatch:
             Button("开始同步填写") {
-                guard let url = store.surveyURL else { return }
+                guard let url = session.surveyURL else { return }
                 webController.startParallelTest(
                     presets: store.queuePresets,
                     surveyURL: url
@@ -430,7 +727,7 @@ struct ContentView: View {
             }
         case .scheduleBatch:
             Button("设置整点任务") {
-                guard let url = store.surveyURL else { return }
+                guard let url = session.surveyURL else { return }
                 webController.scheduleBatchAtNextHour(
                     presets: store.queuePresets,
                     surveyURL: url
@@ -470,7 +767,7 @@ struct ContentView: View {
         if webController.isFilling { return "填写中" }
         if webController.isWaitingToSubmit { return "等待提交" }
         if webController.isSubmitting { return "提交中" }
-        return store.autoSubmitAfterFill ? "填写并提交" : "自动填写"
+        return session.autoSubmitAfterFill ? "填写并提交" : "自动填写"
     }
 
     private var nextWholeHour: Date {
@@ -478,6 +775,51 @@ struct ContentView: View {
         let hourStart = Calendar.current.dateInterval(of: .hour, for: now)?.start ?? now
         return Calendar.current.date(byAdding: .hour, value: 1, to: hourStart)
             ?? now.addingTimeInterval(3_600)
+    }
+
+    private var selectedPreset: SubmissionPreset? {
+        store.presets.first { $0.id == session.selectedPresetID } ?? store.presets.first
+    }
+
+    private var selectedPresetIDBinding: Binding<UUID> {
+        Binding(
+            get: { session.selectedPresetID },
+            set: {
+                session.selectedPresetID = $0
+                store.selectedPresetID = $0
+            }
+        )
+    }
+
+    private var autoFillOnLoadBinding: Binding<Bool> {
+        Binding(
+            get: { session.autoFillOnLoad },
+            set: {
+                session.autoFillOnLoad = $0
+                store.autoFillOnLoad = $0
+            }
+        )
+    }
+
+    private var autoSubmitAfterFillBinding: Binding<Bool> {
+        Binding(
+            get: { session.autoSubmitAfterFill },
+            set: {
+                session.autoSubmitAfterFill = $0
+                store.autoSubmitAfterFill = $0
+            }
+        )
+    }
+
+    private var submitDelaySecondsBinding: Binding<Int> {
+        Binding(
+            get: { session.submitDelaySeconds },
+            set: {
+                let value = min(max($0, 0), RuleStore.maximumSubmitDelaySeconds)
+                session.submitDelaySeconds = value
+                store.setSubmitDelaySeconds(value)
+            }
+        )
     }
 
     private var formattedBatchCountdown: String {
@@ -491,7 +833,7 @@ struct ContentView: View {
     }
 
     private var canStartQueue: Bool {
-        guard store.isParallelReady, store.surveyURL != nil, !webController.isBusy else { return false }
+        guard store.isParallelReady, session.surveyURL != nil, !webController.isBusy else { return false }
         switch webController.state {
         case .ready(_), .submitted(_): return true
         default: return false
@@ -499,7 +841,7 @@ struct ContentView: View {
     }
 
     private var canScheduleQueue: Bool {
-        guard store.isParallelReady, store.surveyURL != nil, !webController.isBusy else { return false }
+        guard store.isParallelReady, session.surveyURL != nil, !webController.isBusy else { return false }
         if case .loading = webController.state { return false }
         return true
     }
@@ -548,9 +890,9 @@ struct ContentView: View {
             return "已填写 \(webController.batchPreparedCount)/\(snapshot.total) · \(snapshot.detail)"
         }
         if webController.isFilling {
-            return "使用 \(store.selectedPreset?.name ?? "当前预设")"
+            return "使用 \(selectedPreset?.name ?? "当前预设")"
         }
-        if webController.isWaitingToSubmit { return "填写完成，\(store.submitDelaySeconds) 秒后提交" }
+        if webController.isWaitingToSubmit { return "填写完成，\(session.submitDelaySeconds) 秒后提交" }
         if webController.isSubmitting { return "等待问卷星返回结果" }
 
         switch webController.queueState {
@@ -565,7 +907,7 @@ struct ContentView: View {
 
         switch webController.state {
         case .loading:
-            return store.surveyURL?.host ?? "正在连接"
+            return session.surveyURL?.host ?? "正在连接"
         case .ready(let count):
             return "检测到 \(count) 道可填写题目"
         case .submitted(let message), .closed(let message), .failed(let message):

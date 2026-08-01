@@ -16,6 +16,11 @@ struct RuleEditorView: View {
     }
 
     @ObservedObject var store: RuleStore
+    @Binding var surveyURLString: String
+    @Binding var selectedPresetID: UUID
+    @Binding var autoFillOnLoad: Bool
+    @Binding var autoSubmitAfterFill: Bool
+    @Binding var submitDelaySeconds: Int
     @Environment(\.dismiss) private var dismiss
     @State private var page: Page = .survey
     @State private var showingClearConfirmation = false
@@ -76,26 +81,26 @@ struct RuleEditorView: View {
     private var surveySettings: some View {
         Form {
             Section("问卷地址") {
-                TextField("https://www.wjx.cn/...", text: $store.surveyURLString)
+                TextField("https://www.wjx.cn/...", text: $surveyURLString)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
                 HStack(spacing: 8) {
-                    Image(systemName: store.surveyURL == nil ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(store.surveyURL == nil ? Color.orange : Color.green)
-                    Text(store.surveyURL == nil ? "地址无效" : (store.surveyURL?.host ?? "地址有效"))
+                    Image(systemName: surveyURL == nil ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(surveyURL == nil ? Color.orange : Color.green)
+                    Text(surveyURL == nil ? "地址无效" : (surveyURL?.host ?? "地址有效"))
                         .font(.subheadline)
                     Spacer()
                 }
             }
 
             Section("自动流程") {
-                Toggle(isOn: $store.autoFillOnLoad) {
+                Toggle(isOn: $autoFillOnLoad) {
                     Label("页面加载后自动填写", systemImage: "wand.and.stars")
                 }
 
-                Toggle(isOn: $store.autoSubmitAfterFill) {
+                Toggle(isOn: $autoSubmitAfterFill) {
                     Label("单组填写后自动提交", systemImage: "paperplane")
                 }
 
@@ -105,7 +110,7 @@ struct RuleEditorView: View {
             Section("当前单次预设") {
                 presetPicker
 
-                if let preset = store.selectedPreset {
+                if let preset = selectedPreset {
                     HStack {
                         Text("数据完整度")
                         Spacer()
@@ -147,7 +152,7 @@ struct RuleEditorView: View {
                 }
             }
 
-            if let preset = store.selectedPreset {
+            if let preset = selectedPreset {
                 Section {
                     presetStatus(preset)
                 }
@@ -180,7 +185,7 @@ struct RuleEditorView: View {
 
                 Section {
                     Button(role: .destructive) {
-                        presetPendingClear = store.selectedPresetID
+                        presetPendingClear = selectedPresetID
                         showingClearConfirmation = true
                     } label: {
                         Label("清空当前预设", systemImage: "trash")
@@ -264,12 +269,12 @@ struct RuleEditorView: View {
                 Spacer()
 
                 Button {
-                    store.selectedPresetID = preset.id
+                    selectedPresetID = preset.id
                 } label: {
-                    Image(systemName: store.selectedPresetID == preset.id ? "checkmark.circle.fill" : "circle")
+                    Image(systemName: selectedPresetID == preset.id ? "checkmark.circle.fill" : "circle")
                         .frame(width: 28, height: 28)
                 }
-                .foregroundStyle(store.selectedPresetID == preset.id ? Color.green : Color.secondary)
+                .foregroundStyle(selectedPresetID == preset.id ? Color.green : Color.secondary)
                 .accessibilityLabel("设为单次填写预设")
                 .help("设为单次填写预设")
 
@@ -369,7 +374,7 @@ struct RuleEditorView: View {
         Menu {
             ForEach(store.presets) { preset in
                 Button {
-                    store.selectedPresetID = preset.id
+                    selectedPresetID = preset.id
                 } label: {
                     Label(
                         preset.name,
@@ -379,7 +384,7 @@ struct RuleEditorView: View {
             }
         } label: {
             HStack(spacing: 7) {
-                Text(store.selectedPreset?.name ?? "选择预设")
+                Text(selectedPreset?.name ?? "选择预设")
                     .font(.subheadline.weight(.semibold))
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.caption2)
@@ -423,7 +428,7 @@ struct RuleEditorView: View {
                 .foregroundStyle(.secondary)
             TextField(
                 placeholder,
-                text: answerBinding(presetID: store.selectedPresetID, keyword: title)
+                text: answerBinding(presetID: selectedPresetID, keyword: title)
             )
             .textFieldStyle(.roundedBorder)
             .textContentType(contentType)
@@ -435,13 +440,21 @@ struct RuleEditorView: View {
     }
 
     private var selectedIndex: Int {
-        store.selectedPresetIndex ?? 0
+        store.presets.firstIndex(where: { $0.id == selectedPresetID }) ?? 0
+    }
+
+    private var selectedPreset: SubmissionPreset? {
+        store.presets.first { $0.id == selectedPresetID } ?? store.presets.first
+    }
+
+    private var surveyURL: URL? {
+        RuleStore.validatedSurveyURL(from: surveyURLString)
     }
 
     private func moveSelection(by offset: Int) {
         let target = selectedIndex + offset
         guard store.presets.indices.contains(target) else { return }
-        store.selectedPresetID = store.presets[target].id
+        selectedPresetID = store.presets[target].id
     }
 
     private func answerBinding(presetID: UUID, keyword: String) -> Binding<String> {
@@ -453,8 +466,13 @@ struct RuleEditorView: View {
 
     private var submitDelayBinding: Binding<Int> {
         Binding(
-            get: { store.submitDelaySeconds },
-            set: { store.setSubmitDelaySeconds($0) }
+            get: { submitDelaySeconds },
+            set: {
+                submitDelaySeconds = min(
+                    max($0, 0),
+                    RuleStore.maximumSubmitDelaySeconds
+                )
+            }
         )
     }
 
