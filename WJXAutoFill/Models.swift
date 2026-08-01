@@ -138,6 +138,7 @@ struct ParallelRunSnapshot: Equatable {
 
 final class RuleStore: ObservableObject {
     static let presetCount = 10
+    static let maximumSubmitDelaySeconds = 300
 
     private enum Key {
         static let rules = "fillRules.v1"
@@ -146,6 +147,7 @@ final class RuleStore: ObservableObject {
         static let surveyURL = "surveyURL.v1"
         static let autoFill = "autoFillOnLoad.v1"
         static let autoSubmit = "autoSubmitAfterFill.v1"
+        static let submitDelay = "submitDelaySeconds.v1"
         static let parallelConcurrency = "parallelConcurrency.v2"
     }
 
@@ -171,6 +173,7 @@ final class RuleStore: ObservableObject {
         didSet { defaults.set(autoSubmitAfterFill, forKey: Key.autoSubmit) }
     }
 
+    @Published private(set) var submitDelaySeconds: Int
     @Published private(set) var parallelConcurrency: Int
 
     init(defaults: UserDefaults = .standard) {
@@ -188,6 +191,15 @@ final class RuleStore: ObservableObject {
             autoSubmitAfterFill = true
         } else {
             autoSubmitAfterFill = defaults.bool(forKey: Key.autoSubmit)
+        }
+
+        if let storedDelay = defaults.object(forKey: Key.submitDelay) as? NSNumber {
+            submitDelaySeconds = min(
+                max(storedDelay.intValue, 0),
+                Self.maximumSubmitDelaySeconds
+            )
+        } else {
+            submitDelaySeconds = 2
         }
 
         // 固定十组任务同时启动；使用新键，避免旧版本保存的 3/5 并发继续生效。
@@ -302,6 +314,12 @@ final class RuleStore: ObservableObject {
             presets[presetIndex].rules[ruleIndex].answer = ""
             presets[presetIndex].rules[ruleIndex].isEnabled = false
         }
+    }
+
+    func setSubmitDelaySeconds(_ value: Int) {
+        let clampedValue = min(max(value, 0), Self.maximumSubmitDelaySeconds)
+        submitDelaySeconds = clampedValue
+        defaults.set(clampedValue, forKey: Key.submitDelay)
     }
 
     private func persistPresets() {

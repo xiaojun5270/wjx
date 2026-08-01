@@ -25,7 +25,8 @@ struct ContentView: View {
                             url: url,
                             rules: store.selectedPreset?.rules ?? [],
                             autoFillOnLoad: store.autoFillOnLoad,
-                            autoSubmitAfterFill: store.autoSubmitAfterFill
+                            autoSubmitAfterFill: store.autoSubmitAfterFill,
+                            submitDelaySeconds: store.submitDelaySeconds
                         )
                     }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -229,7 +230,10 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 Button {
                     if store.autoSubmitAfterFill {
-                        webController.fillAndSubmit(rules: store.selectedPreset?.rules ?? [])
+                        webController.fillAndSubmit(
+                            rules: store.selectedPreset?.rules ?? [],
+                            submitDelaySeconds: store.submitDelaySeconds
+                        )
                     } else {
                         webController.fill(rules: store.selectedPreset?.rules ?? [])
                     }
@@ -259,7 +263,7 @@ struct ContentView: View {
                 showingConfirmation = true
             } label: {
                 HStack {
-                    Label("并行提交 10 组", systemImage: "rectangle.3.group.fill")
+                    Label("提交 10 组预设", systemImage: "rectangle.3.group.fill")
                     Spacer()
                     Text(batchReadinessText)
                         .font(.caption.monospacedDigit())
@@ -340,12 +344,13 @@ struct ContentView: View {
                 webController.submitOnce()
             }
         case .testQueue:
-            Button("启动 10 个并行任务", role: .destructive) {
+            Button("启动 10 组任务", role: .destructive) {
                 guard let url = store.surveyURL else { return }
                 webController.startParallelTest(
                     presets: store.queuePresets,
                     surveyURL: url,
-                    concurrency: store.parallelConcurrency
+                    concurrency: store.parallelConcurrency,
+                    submitDelaySeconds: store.submitDelaySeconds
                 )
             }
         }
@@ -364,7 +369,7 @@ struct ContentView: View {
         case .singleSubmit:
             return "将提交当前页面中的答案，仅执行一次。"
         case .testQueue:
-            return "将同时启动 10 个隐藏任务。遇到安全验证或问卷关闭时会停止。"
+            return "10 个页面并行填写，提交时严格逐组执行，每组间隔 \(store.submitDelaySeconds) 秒。"
         }
     }
 
@@ -417,7 +422,7 @@ struct ContentView: View {
         if webController.isFilling {
             return "使用 \(store.selectedPreset?.name ?? "当前预设")"
         }
-        if webController.isWaitingToSubmit { return "填写完成，2 秒后提交" }
+        if webController.isWaitingToSubmit { return "填写完成，\(store.submitDelaySeconds) 秒后提交" }
         if webController.isSubmitting { return "等待问卷星返回结果" }
 
         switch webController.queueState {

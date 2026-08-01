@@ -192,6 +192,7 @@ enum AutomationScript {
         presets: [SubmissionPreset],
         surveyURL: URL,
         concurrency: Int,
+        submitDelaySeconds: Int,
         runID: String
     ) -> String? {
         let tasks: [[String: Any]] = presets.compactMap { preset in
@@ -205,6 +206,7 @@ enum AutomationScript {
             "runID": runID,
             "surveyURL": surveyURL.absoluteString,
             "concurrency": max(1, min(concurrency, 10)),
+            "submitDelayMilliseconds": min(max(submitDelaySeconds, 0), 300) * 1_000,
             "tasks": tasks,
             "scanScript": scan,
             "submitScript": submit
@@ -246,9 +248,15 @@ enum AutomationScript {
             succeeded: 0,
             failed: 0,
             frames: new Set(),
+            submitQueue: [],
+            submitInFlight: false,
+            submitTimer: null,
             cancel(shouldNotify = true) {
               if (this.cancelled) return;
               this.cancelled = true;
+              if (this.submitTimer) clearTimeout(this.submitTimer);
+              this.submitTimer = null;
+              this.submitQueue = [];
               for (const frame of this.frames) {
                 try { frame.remove(); } catch (_) {}
               }
@@ -262,6 +270,10 @@ enum AutomationScript {
 
           const total = config.tasks.length;
           const concurrency = Math.max(1, Math.min(Number(config.concurrency) || 1, 10));
+          const submitDelayMilliseconds = Math.max(
+            0,
+            Math.min(Number(config.submitDelayMilliseconds) || 0, 300000)
+          );
 
           const evaluateInFrame = (task, script) => {
             const frameWindow = task.frame.contentWindow;
@@ -271,7 +283,9 @@ enum AutomationScript {
 
           const finishTask = (task, succeeded, errorMessage = '') => {
             if (task.done || runner.cancelled) return;
+            const completedSubmission = task.phase === 'submitting';
             task.done = true;
+            if (completedSubmission) runner.submitInFlight = false;
             runner.active -= 1;
             runner.processed += 1;
             succeeded ? (runner.succeeded += 1) : (runner.failed += 1);
@@ -300,6 +314,7 @@ enum AutomationScript {
               runner.cancel(false);
             } else {
               pump();
+              scheduleNextSubmit();
             }
           };
 
@@ -361,8 +376,8 @@ enum AutomationScript {
             }
 
             const detail = message || preview || '空响应';
-            if (/验证码|人机验证/.test(detail)) {
-              stopAll(`问卷星要求人机验证（返回码 ${code || '未知'}），后台并行测试已停止。`);
+            if (code === '22' || code === '7' || /验证码|人机验证|安全验证|智能验证/.test(detail)) {
+              stopAll(`问卷星要求人机验证（返回码 ${code || '未知'}），批量任务已停止。`);
               return;
             }
             finishTask(task, false, `问卷星返回码 ${code || '未知'}：${detail}`);
@@ -462,7 +477,7 @@ enum AutomationScript {
             if (scanResult.status === 'submitted') {
               finishTask(task, true);
             } else if (scanResult.status === 'captcha') {
-              stopAll('页面要求人机验证，后台并行测试已停止。');
+              stopAll('页面要求人机验证，批量任务已停止。');
             } else if (scanResult.status === 'closed') {
               stopAll(scanResult.message || '问卷当前不可提交。');
             } else {
@@ -473,6 +488,62 @@ enum AutomationScript {
               );
             }
           };
+
+          const submitFilledTask = task => {
+            if (task.done || runner.cancelled || task.phase !== 'queued-for-submit') return;
+            task.phase = 'submitting';
+            notify({
+              type: 'submitting',
+              completed: runner.processed,
+              succeeded: runner.succeeded,
+              failed: runner.failed,
+              active: runner.active,
+              total,
+              presetName: task.name
+            });
+
+            let submitResult;
+            try {
+              submitResult = evaluateInFrame(task, config.submitScript);
+            } catch (error) {
+              finishTask(task, false, `触发提交失败：${error.message || error}`);
+              return;
+            }
+            if (submitResult.status === 'captcha') {
+              stopAll('页面要求人机验证，批量任务已停止。');
+              return;
+            }
+            if (submitResult.status !== 'scheduled') {
+              finishTask(task, false, submitResult.message || '当前页面无法提交。');
+              return;
+            }
+
+            setTimeout(() => {
+              if (!task.done && !runner.cancelled && task.phase === 'submitting') {
+                inspectSubmittedPage(task);
+              }
+            }, 8000);
+          };
+
+          function scheduleNextSubmit() {
+            if (
+              runner.cancelled || runner.submitInFlight || runner.submitTimer ||
+              !runner.submitQueue.length
+            ) return;
+
+            runner.submitTimer = setTimeout(() => {
+              runner.submitTimer = null;
+              if (runner.cancelled) return;
+
+              const task = runner.submitQueue.shift();
+              if (!task || task.done) {
+                scheduleNextSubmit();
+                return;
+              }
+              runner.submitInFlight = true;
+              submitFilledTask(task);
+            }, submitDelayMilliseconds);
+          }
 
           const handleFrameLoad = task => {
             if (task.done || runner.cancelled) return;
@@ -488,6 +559,7 @@ enum AutomationScript {
               inspectSubmittedPage(task);
               return;
             }
+            if (task.phase === 'queued-for-submit') return;
 
             let scanResult;
             try {
@@ -498,7 +570,7 @@ enum AutomationScript {
             }
 
             if (scanResult.status === 'captcha') {
-              stopAll('页面要求人机验证，后台并行测试已停止。');
+              stopAll('页面要求人机验证，批量任务已停止。');
               return;
             }
             if (scanResult.status === 'closed') {
@@ -529,28 +601,20 @@ enum AutomationScript {
               return;
             }
 
-            let submitResult;
-            try {
-              submitResult = evaluateInFrame(task, config.submitScript);
-            } catch (error) {
-              finishTask(task, false, `触发提交失败：${error.message || error}`);
-              return;
-            }
-            if (submitResult.status === 'captcha') {
-              stopAll('页面要求人机验证，后台并行测试已停止。');
-              return;
-            }
-            if (submitResult.status !== 'scheduled') {
-              finishTask(task, false, submitResult.message || '当前页面无法提交。');
-              return;
-            }
-
-            task.phase = 'submitting';
-            setTimeout(() => {
-              if (!task.done && !runner.cancelled && task.phase === 'submitting') {
-                inspectSubmittedPage(task);
-              }
-            }, 8000);
+            task.phase = 'queued-for-submit';
+            runner.submitQueue.push(task);
+            notify({
+              type: 'queued',
+              completed: runner.processed,
+              succeeded: runner.succeeded,
+              failed: runner.failed,
+              active: runner.active,
+              total,
+              presetName: task.name,
+              queued: runner.submitQueue.length,
+              delaySeconds: submitDelayMilliseconds / 1000
+            });
+            scheduleNextSubmit();
           };
 
           const workerURL = (() => {

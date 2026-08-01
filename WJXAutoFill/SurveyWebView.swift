@@ -118,7 +118,11 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
-    func fillAndSubmit(rules: [FillRule], silent: Bool = false) {
+    func fillAndSubmit(
+        rules: [FillRule],
+        submitDelaySeconds: Int,
+        silent: Bool = false
+    ) {
         guard canAttemptFill else { return }
         resetQueueSummary()
         isFilling = true
@@ -141,7 +145,10 @@ final class SurveyWebController: ObservableObject {
                     return
                 }
 
-                self.scheduleAutoSubmit(showScheduledNotice: !silent)
+                self.scheduleAutoSubmit(
+                    showScheduledNotice: !silent,
+                    delaySeconds: submitDelaySeconds
+                )
 
             case .closed(let message):
                 self.state = .closed(message)
@@ -162,18 +169,19 @@ final class SurveyWebController: ObservableObject {
     func startParallelTest(
         presets: [SubmissionPreset],
         surveyURL: URL,
-        concurrency: Int
+        concurrency: Int,
+        submitDelaySeconds: Int
     ) {
         guard !isBusy else { return }
         guard let webView else {
-            appendLog("并行提交启动失败：问卷页面尚未加载。", level: .error, category: .batch)
+            appendLog("批量提交启动失败：问卷页面尚未加载。", level: .error, category: .batch)
             notice = UserNotice(title: "无法启动测试", message: "问卷页面尚未加载。")
             return
         }
 
         let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(RuleStore.presetCount))
         guard usablePresets.count == RuleStore.presetCount else {
-            appendLog("并行提交启动失败：10 组预设未填写完整。", level: .warning, category: .batch)
+            appendLog("批量提交启动失败：10 组预设未填写完整。", level: .warning, category: .batch)
             notice = UserNotice(title: "预设未填写完整", message: "请先完整填写 10 组不同的姓名、工号和固定邮箱。")
             return
         }
@@ -181,7 +189,7 @@ final class SurveyWebController: ObservableObject {
         for keyword in SubmissionPreset.requiredQuestions {
             let values = usablePresets.map { $0.answer(for: keyword).lowercased() }
             guard Set(values).count == RuleStore.presetCount else {
-                appendLog("并行提交启动失败：10 组预设的\(keyword)存在重复。", level: .warning, category: .batch)
+                appendLog("批量提交启动失败：10 组预设的\(keyword)存在重复。", level: .warning, category: .batch)
                 notice = UserNotice(title: "预设内容重复", message: "10 组预设的\(keyword)必须各不相同。")
                 return
             }
@@ -193,9 +201,10 @@ final class SurveyWebController: ObservableObject {
             presets: usablePresets,
             surveyURL: surveyURL,
             concurrency: concurrency,
+            submitDelaySeconds: submitDelaySeconds,
             runID: runID
         ) else {
-            appendLog("并行提交启动失败：无法生成后台任务。", level: .error, category: .batch)
+            appendLog("批量提交启动失败：无法生成后台任务。", level: .error, category: .batch)
             notice = UserNotice(title: "无法启动测试", message: "生成后台任务失败。")
             return
         }
@@ -212,7 +221,7 @@ final class SurveyWebController: ObservableObject {
             active: 0,
             detail: "正在启动后台任务"
         )
-        appendLog("启动 \(usablePresets.count) 个并行填写和提交任务。", category: .batch)
+        appendLog("启动 \(usablePresets.count) 组任务：页面并行填写，按 \(submitDelaySeconds) 秒间隔逐组提交。", category: .batch)
         beginBackgroundExecution()
 
         webView.evaluateJavaScript(script) { [weak self] result, error in
@@ -237,7 +246,7 @@ final class SurveyWebController: ObservableObject {
            let script = AutomationScript.cancelParallel(runID: runID) {
             webView?.evaluateJavaScript(script)
         }
-        stopQueue(message: "后台并行测试已由用户停止。", showNotice: true)
+        stopQueue(message: "批量任务已由用户停止。", showNotice: true)
     }
 
     func submitOnce(showScheduledNotice: Bool = true, source: String = "手动提交") {
@@ -326,7 +335,8 @@ final class SurveyWebController: ObservableObject {
     fileprivate func handlePageLoaded(
         defaultRules: [FillRule],
         autoFillOnLoad: Bool,
-        autoSubmitAfterFill: Bool
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
     ) {
         if let webView {
             updateNavigationState(from: webView)
@@ -336,7 +346,11 @@ final class SurveyWebController: ObservableObject {
             if !self.isQueueRunning, autoFillOnLoad, case .ready(_) = scannedState {
                 if autoSubmitAfterFill {
                     guard !self.hasAutoSubmittedCurrentForm else { return }
-                    self.fillAndSubmit(rules: defaultRules, silent: true)
+                    self.fillAndSubmit(
+                        rules: defaultRules,
+                        submitDelaySeconds: submitDelaySeconds,
+                        silent: true
+                    )
                 } else {
                     self.fill(rules: defaultRules, silent: true)
                 }
@@ -374,7 +388,7 @@ final class SurveyWebController: ObservableObject {
 
         switch type {
         case "started":
-            let detail = active > 0 ? "已启动 \(active) 个任务" : "正在调度后台任务"
+            let detail = active > 0 ? "正在填写 \(active) 组" : "正在调度批量任务"
             queueState = .running(current: completed, total: total, presetName: detail)
             queueSnapshot = ParallelRunSnapshot(
                 completed: completed,
@@ -384,10 +398,38 @@ final class SurveyWebController: ObservableObject {
                 active: active,
                 detail: detail
             )
-            appendLog("并行任务已启动：共 \(total) 个。", category: .batch)
+            appendLog("批量任务已启动：共 \(total) 组，提交将逐组执行。", category: .batch)
+
+        case "queued":
+            let delaySeconds = payload["delaySeconds"] as? Int ?? 0
+            let queued = payload["queued"] as? Int ?? 0
+            let detail = "\(presetName) 已填写，等待提交"
+            queueState = .running(current: completed, total: total, presetName: detail)
+            queueSnapshot = ParallelRunSnapshot(
+                completed: completed,
+                total: total,
+                succeeded: succeeded,
+                failed: failed,
+                active: active,
+                detail: detail
+            )
+            appendLog("\(presetName)已填写，进入提交队列（队列 \(queued) 组，间隔 \(delaySeconds) 秒）。", category: .batch)
+
+        case "submitting":
+            let detail = "正在提交 \(presetName)"
+            queueState = .running(current: completed, total: total, presetName: detail)
+            queueSnapshot = ParallelRunSnapshot(
+                completed: completed,
+                total: total,
+                succeeded: succeeded,
+                failed: failed,
+                active: active,
+                detail: detail
+            )
+            appendLog("开始提交\(presetName)；其余预设继续等待。", category: .batch)
 
         case "progress":
-            let detail = active > 0 ? "并行运行 \(active) 个任务" : "正在调度任务"
+            let detail = active > 0 ? "批量任务运行中" : "正在调度任务"
             queueState = .running(current: completed, total: total, presetName: detail)
             queueSnapshot = ParallelRunSnapshot(
                 completed: completed,
@@ -414,20 +456,20 @@ final class SurveyWebController: ObservableObject {
                 active: 0,
                 detail: "全部任务已完成"
             )
-            appendLog("并行提交完成：成功 \(succeeded)，失败 \(failed)。", level: failed == 0 ? .success : .warning, category: .batch)
+            appendLog("批量提交完成：成功 \(succeeded)，失败 \(failed)。", level: failed == 0 ? .success : .warning, category: .batch)
             notice = UserNotice(
-                title: "后台并行测试完成",
+                title: "批量任务完成",
                 message: "成功 \(succeeded) 个，失败 \(failed) 个，共处理 \(total) 个预设。"
             )
 
         case "fatal":
             stopQueue(
-                message: payload["message"] as? String ?? "后台并行测试已停止。",
+                message: payload["message"] as? String ?? "批量任务已停止。",
                 showNotice: true
             )
 
         case "stopped":
-            stopQueue(message: "后台并行测试已停止。", showNotice: false)
+            stopQueue(message: "批量任务已停止。", showNotice: false)
 
         default:
             break
@@ -525,7 +567,7 @@ final class SurveyWebController: ObservableObject {
         let category: AutomationLogCategory = message.contains("验证") ? .security : .batch
         appendLog(message, level: .warning, category: category)
         if showNotice {
-            notice = UserNotice(title: "后台并行测试已停止", message: message)
+            notice = UserNotice(title: "批量任务已停止", message: message)
         }
     }
 
@@ -553,10 +595,11 @@ final class SurveyWebController: ObservableObject {
         backgroundTaskID = .invalid
     }
 
-    private func scheduleAutoSubmit(showScheduledNotice: Bool) {
+    private func scheduleAutoSubmit(showScheduledNotice: Bool, delaySeconds: Int) {
         cancelPendingAutoSubmit()
+        let safeDelay = min(max(delaySeconds, 0), RuleStore.maximumSubmitDelaySeconds)
         isWaitingToSubmit = true
-        appendLog("填写已完成，等待 2 秒后提交。", category: .submit)
+        appendLog("填写已完成，等待 \(safeDelay) 秒后提交。", category: .submit)
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -566,7 +609,7 @@ final class SurveyWebController: ObservableObject {
             self.submitOnce(showScheduledNotice: showScheduledNotice, source: "自动提交")
         }
         pendingAutoSubmitWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(safeDelay), execute: workItem)
     }
 
     private func inspectSingleSubmitResult(source: String, attempt: Int) {
@@ -676,6 +719,7 @@ struct SurveyWebView: UIViewRepresentable {
     let rules: [FillRule]
     let autoFillOnLoad: Bool
     let autoSubmitAfterFill: Bool
+    let submitDelaySeconds: Int
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -732,7 +776,8 @@ struct SurveyWebView: UIViewRepresentable {
             parent.controller.handlePageLoaded(
                 defaultRules: parent.rules,
                 autoFillOnLoad: parent.autoFillOnLoad,
-                autoSubmitAfterFill: parent.autoSubmitAfterFill
+                autoSubmitAfterFill: parent.autoSubmitAfterFill,
+                submitDelaySeconds: parent.submitDelaySeconds
             )
         }
 

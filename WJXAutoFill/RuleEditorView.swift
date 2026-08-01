@@ -10,10 +10,17 @@ struct RuleEditorView: View {
         var id: String { rawValue }
     }
 
+    private struct BatchField: Hashable {
+        let presetID: UUID
+        let keyword: String
+    }
+
     @ObservedObject var store: RuleStore
     @Environment(\.dismiss) private var dismiss
     @State private var page: Page = .survey
     @State private var showingClearConfirmation = false
+    @State private var presetPendingClear: UUID?
+    @FocusState private var focusedBatchField: BatchField?
 
     var body: some View {
         NavigationStack {
@@ -44,14 +51,22 @@ struct RuleEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
                 }
+
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("收起") { focusedBatchField = nil }
+                }
             }
             .confirmationDialog(
-                "清空当前预设？",
+                "清空这组预设？",
                 isPresented: $showingClearConfirmation,
                 titleVisibility: .visible
             ) {
                 Button("清空姓名、工号和邮箱", role: .destructive) {
-                    store.clearPreset(store.selectedPresetID)
+                    if let presetID = presetPendingClear {
+                        store.clearPreset(presetID)
+                    }
+                    presetPendingClear = nil
                 }
                 Button("取消", role: .cancel) {}
             }
@@ -84,12 +99,7 @@ struct RuleEditorView: View {
                     Label("填写完成后自动提交", systemImage: "paperplane")
                 }
 
-                LabeledContent {
-                    Text("2 秒")
-                        .foregroundStyle(.secondary)
-                } label: {
-                    Label("提交等待", systemImage: "timer")
-                }
+                submitDelayEditor
             }
 
             Section("当前单次预设") {
@@ -170,6 +180,7 @@ struct RuleEditorView: View {
 
                 Section {
                     Button(role: .destructive) {
+                        presetPendingClear = store.selectedPresetID
                         showingClearConfirmation = true
                     } label: {
                         Label("清空当前预设", systemImage: "trash")
@@ -181,83 +192,178 @@ struct RuleEditorView: View {
     }
 
     private var batchOverview: some View {
-        Form {
-            Section("批量状态") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("完整预设")
-                        Spacer()
-                        Text("\(store.queuePresets.count) / \(RuleStore.presetCount)")
-                            .font(.subheadline.monospacedDigit().weight(.semibold))
-                    }
-                    ProgressView(
-                        value: Double(store.queuePresets.count),
-                        total: Double(RuleStore.presetCount)
-                    )
-                    .tint(store.isParallelReady ? .green : .orange)
-                }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                batchSummary
 
-                HStack(spacing: 8) {
-                    Image(systemName: store.isParallelReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(store.isParallelReady ? Color.green : Color.orange)
-                    Text(store.parallelValidationMessage ?? "10 组数据检查通过")
-                        .font(.subheadline)
-                }
+                Text("10 组提交内容")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
 
-                if let firstInvalidPreset {
-                    Button {
-                        store.selectedPresetID = firstInvalidPreset.id
-                        page = .preset
-                    } label: {
-                        Label("检查 \(firstInvalidPreset.name)", systemImage: "arrow.right.circle")
-                    }
-                }
-            }
-
-            Section("10 组预设") {
                 ForEach(store.presets) { preset in
-                    Button {
-                        store.selectedPresetID = preset.id
-                        page = .preset
-                    } label: {
-                        HStack(spacing: 11) {
-                            ZStack {
-                                Circle()
-                                    .fill(statusColor(for: preset).opacity(0.14))
-                                Text("\(presetNumber(for: preset))")
-                                    .font(.caption.monospacedDigit().weight(.semibold))
-                                    .foregroundStyle(statusColor(for: preset))
-                            }
-                            .frame(width: 30, height: 30)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(preset.name)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                Text(store.validationMessage(for: preset) ?? "数据完整且不重复")
-                                    .font(.caption)
-                                    .foregroundStyle(store.validationMessage(for: preset) == nil ? Color.secondary : Color.orange)
-                                    .lineLimit(1)
-                            }
-
-                            Spacer()
-                            Text("\(preset.completedFieldCount)/3")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    batchPresetEditor(preset)
                 }
             }
+            .padding(14)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
 
-            Section("执行参数") {
-                LabeledContent("预设数量", value: "10")
-                LabeledContent("并行任务", value: "10")
-                LabeledContent("安全验证", value: "出现时停止")
+    private var batchSummary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("批量数据")
+                        .font(.subheadline.weight(.semibold))
+                    Text(store.parallelValidationMessage ?? "10 组数据检查通过")
+                        .font(.caption)
+                        .foregroundStyle(store.isParallelReady ? Color.secondary : Color.orange)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Text("\(store.queuePresets.count) / \(RuleStore.presetCount)")
+                    .font(.title3.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(store.isParallelReady ? Color.green : Color.orange)
             }
+
+            ProgressView(
+                value: Double(store.queuePresets.count),
+                total: Double(RuleStore.presetCount)
+            )
+            .tint(store.isParallelReady ? .green : .orange)
+
+            Divider()
+            submitDelayEditor
+        }
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func batchPresetEditor(_ preset: SubmissionPreset) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(statusColor(for: preset).opacity(0.14))
+                    Text("\(presetNumber(for: preset))")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(statusColor(for: preset))
+                }
+                .frame(width: 30, height: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(preset.name)
+                        .font(.subheadline.weight(.semibold))
+                    Text(store.validationMessage(for: preset) ?? "数据完整且不重复")
+                        .font(.caption)
+                        .foregroundStyle(store.validationMessage(for: preset) == nil ? Color.secondary : Color.orange)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    store.selectedPresetID = preset.id
+                } label: {
+                    Image(systemName: store.selectedPresetID == preset.id ? "checkmark.circle.fill" : "circle")
+                        .frame(width: 28, height: 28)
+                }
+                .foregroundStyle(store.selectedPresetID == preset.id ? Color.green : Color.secondary)
+                .accessibilityLabel("设为单次填写预设")
+                .help("设为单次填写预设")
+
+                Button(role: .destructive) {
+                    presetPendingClear = preset.id
+                    showingClearConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 28, height: 28)
+                }
+                .accessibilityLabel("清空该预设")
+                .help("清空该预设")
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                batchAnswerField(
+                    title: "姓名",
+                    placeholder: "姓名",
+                    presetID: preset.id,
+                    keyboard: .default,
+                    contentType: .name
+                )
+                batchAnswerField(
+                    title: "工号",
+                    placeholder: "工号",
+                    presetID: preset.id,
+                    keyboard: .asciiCapable,
+                    contentType: nil
+                )
+            }
+
+            batchAnswerField(
+                title: "邮箱",
+                placeholder: "固定邮箱",
+                presetID: preset.id,
+                keyboard: .emailAddress,
+                contentType: .emailAddress
+            )
+        }
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(statusColor(for: preset).opacity(0.18), lineWidth: 1)
+        }
+    }
+
+    private func batchAnswerField(
+        title: String,
+        placeholder: String,
+        presetID: UUID,
+        keyboard: UIKeyboardType,
+        contentType: UITextContentType?
+    ) -> some View {
+        let field = BatchField(presetID: presetID, keyword: title)
+        return VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: answerBinding(presetID: presetID, keyword: title))
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(keyboard)
+                .textContentType(contentType)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($focusedBatchField, equals: field)
+                .submitLabel(isLastBatchField(field) ? .done : .next)
+                .onSubmit { advanceBatchFocus(after: field) }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var submitDelayEditor: some View {
+        HStack(spacing: 9) {
+            Label("提交间隔", systemImage: "timer")
+                .font(.subheadline)
+            Spacer()
+            TextField("0", value: submitDelayBinding, format: .number)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 64)
+            Text("秒")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Stepper(
+                "提交间隔",
+                value: submitDelayBinding,
+                in: 0...RuleStore.maximumSubmitDelaySeconds
+            )
+            .labelsHidden()
         }
     }
 
@@ -334,10 +440,6 @@ struct RuleEditorView: View {
         store.selectedPresetIndex ?? 0
     }
 
-    private var firstInvalidPreset: SubmissionPreset? {
-        store.presets.first { store.validationMessage(for: $0) != nil }
-    }
-
     private func moveSelection(by offset: Int) {
         let target = selectedIndex + offset
         guard store.presets.indices.contains(target) else { return }
@@ -349,6 +451,35 @@ struct RuleEditorView: View {
             get: { store.fixedAnswer(for: keyword, presetID: presetID) },
             set: { store.setFixedAnswer($0, for: keyword, presetID: presetID) }
         )
+    }
+
+    private var submitDelayBinding: Binding<Int> {
+        Binding(
+            get: { store.submitDelaySeconds },
+            set: { store.setSubmitDelaySeconds($0) }
+        )
+    }
+
+    private var orderedBatchFields: [BatchField] {
+        store.presets.flatMap { preset in
+            SubmissionPreset.requiredQuestions.map {
+                BatchField(presetID: preset.id, keyword: $0)
+            }
+        }
+    }
+
+    private func isLastBatchField(_ field: BatchField) -> Bool {
+        orderedBatchFields.last == field
+    }
+
+    private func advanceBatchFocus(after field: BatchField) {
+        let fields = orderedBatchFields
+        guard let currentIndex = fields.firstIndex(of: field),
+              fields.indices.contains(currentIndex + 1) else {
+            focusedBatchField = nil
+            return
+        }
+        focusedBatchField = fields[currentIndex + 1]
     }
 
     private func statusColor(for preset: SubmissionPreset) -> Color {
