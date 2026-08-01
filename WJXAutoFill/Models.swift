@@ -505,6 +505,25 @@ final class SurveyWorkspace: ObservableObject {
         return pages.first { $0.id == selectedPageID } ?? pages.first
     }
 
+    func hasNextPage(after pageID: UUID) -> Bool {
+        guard let currentIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            return false
+        }
+        return pages.index(after: currentIndex) < pages.endIndex
+    }
+
+    @discardableResult
+    func selectNextPage(after pageID: UUID) -> Bool {
+        guard selectedPageID == pageID,
+              let currentIndex = pages.firstIndex(where: { $0.id == pageID }) else {
+            return false
+        }
+        let nextIndex = pages.index(after: currentIndex)
+        guard pages.indices.contains(nextIndex) else { return false }
+        selectedPageID = pages[nextIndex].id
+        return true
+    }
+
     func synchronizeSurveyURL(_ value: String) {
         let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard RuleStore.validatedSurveyURL(from: normalizedValue) != nil else { return }

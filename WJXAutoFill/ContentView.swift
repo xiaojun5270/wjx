@@ -50,8 +50,15 @@ struct ContentView: View {
                     session: page,
                     store: store,
                     isSelected: workspace.selectedPageID == page.id,
+                    hasNextPage: workspace.hasNextPage(after: page.id),
                     onSynchronizeSurveyURL: { value in
                         workspace.synchronizeSurveyURL(value)
+                    },
+                    onNextPage: {
+                        workspace.selectNextPage(after: page.id)
+                    },
+                    onSubmissionCompleted: {
+                        workspace.selectNextPage(after: page.id)
                     }
                 )
                 .opacity(workspace.selectedPageID == page.id ? 1 : 0)
@@ -266,7 +273,10 @@ private struct SurveyPageView: View {
     @ObservedObject var store: RuleStore
     @ObservedObject private var webController: SurveyWebController
     let isSelected: Bool
+    let hasNextPage: Bool
     let onSynchronizeSurveyURL: (String) -> Void
+    let onNextPage: () -> Void
+    let onSubmissionCompleted: () -> Void
     @State private var showingRules = false
     @State private var showingLogs = false
 
@@ -274,13 +284,19 @@ private struct SurveyPageView: View {
         session: SurveyPageSession,
         store: RuleStore,
         isSelected: Bool,
-        onSynchronizeSurveyURL: @escaping (String) -> Void
+        hasNextPage: Bool,
+        onSynchronizeSurveyURL: @escaping (String) -> Void,
+        onNextPage: @escaping () -> Void,
+        onSubmissionCompleted: @escaping () -> Void
     ) {
         _session = ObservedObject(wrappedValue: session)
         _store = ObservedObject(wrappedValue: store)
         _webController = ObservedObject(wrappedValue: session.controller)
         self.isSelected = isSelected
+        self.hasNextPage = hasNextPage
         self.onSynchronizeSurveyURL = onSynchronizeSurveyURL
+        self.onNextPage = onNextPage
+        self.onSubmissionCompleted = onSubmissionCompleted
     }
 
     var body: some View {
@@ -339,7 +355,36 @@ private struct SurveyPageView: View {
                     dismissButton: .default(Text("知道了"))
                 )
             }
+            .onChange(of: webController.state) { state in
+                guard isSelected, case .submitted = state else { return }
+                onSubmissionCompleted()
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                nextPageBar
+            }
         }
+    }
+
+    private var nextPageBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Button(action: onNextPage) {
+                HStack(spacing: 8) {
+                    Text("下一页")
+                    Image(systemName: "chevron.right")
+                }
+                .font(.headline)
+                .frame(maxWidth: 280)
+                .frame(height: 46)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!hasNextPage)
+            .help(hasNextPage ? "打开下一页" : "已经是最后一页")
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
     }
 
     private var visibleNoticeBinding: Binding<UserNotice?> {
@@ -363,12 +408,13 @@ private struct SurveyPageView: View {
 
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             Button {
-                webController.reload()
+                guard let url = session.surveyURL else { return }
+                webController.reopenSurvey(url)
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .disabled(session.surveyURL == nil || webController.isBusy)
-            .help("重新加载")
+            .help("按保存地址重新打开")
 
             Button {
                 showingLogs = true

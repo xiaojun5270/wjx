@@ -12,9 +12,17 @@ enum AutomationScript {
       };
       const pageText = clean(document.body?.innerText);
       const path = (window.location.pathname || '').toLocaleLowerCase();
+      const visibleQuestionControls = Array.from(document.querySelectorAll(
+        '[topic] input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+        '[topic] textarea, [topic] select, [topic] [contenteditable="true"], ' +
+        'div.field input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+        'div.field textarea, div.field select, div.field [contenteditable="true"], ' +
+        'fieldset input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+        'fieldset textarea, fieldset select, fieldset [contenteditable="true"]'
+      )).some(visible);
       const successMessages = ['答卷已经提交', '提交成功！', '提交完成！', '感谢您的参与！'];
       const successMessage = successMessages.find(message => pageText.includes(message));
-      if (path.includes('/join/complete') || successMessage) {
+      if (path.includes('/join/complete') || (!visibleQuestionControls && successMessage)) {
         return JSON.stringify({
           status: 'submitted',
           message: successMessage || '页面已进入提交完成状态。',

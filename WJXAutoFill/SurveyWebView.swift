@@ -100,35 +100,11 @@ final class SurveyWebController: ObservableObject {
         webView = nil
     }
 
-    func reload() {
-        guard let webView else {
-            state = .failed("问卷页面不可用。")
-            appendLog("重新加载失败：问卷页面不可用。", level: .error, category: .page)
-            return
-        }
-        stopCountdownAutomation()
-        cancelPendingAutoSubmit()
-        if !isQueueRunning {
-            queueState = .idle
-        }
-        hasAutoSubmittedCurrentForm = false
-        canGoBack = false
-        state = .loading
-        appendLog("重新加载问卷页面。", category: .page)
-        guard webView.reload() != nil else {
-            let message = "网页未接受重新加载请求。"
-            state = .failed(message)
-            appendLog(message, level: .error, category: .page)
-            notice = UserNotice(title: "重新加载失败", message: message)
-            return
-        }
-    }
-
     @discardableResult
     func reopenSurvey(_ url: URL) -> Bool {
         guard !isBusy, let webView else { return false }
         prepareForNewSurvey(url)
-        appendLog("通过刷新全部重新打开问卷。", category: .page)
+        appendLog("按已保存地址重新打开问卷：\(url.absoluteString)", category: .page)
         guard webView.load(
             URLRequest(
                 url: url,
