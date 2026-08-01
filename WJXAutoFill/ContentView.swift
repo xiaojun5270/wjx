@@ -1,10 +1,13 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @StateObject private var store: RuleStore
     @StateObject private var workspace: SurveyWorkspace
+    @StateObject private var refreshScheduler = ScheduledPageRefreshScheduler()
     @State private var workspaceNotice: UserNotice?
+    @State private var showingScheduledRefresh = false
 
     init() {
         let store = RuleStore()
@@ -41,6 +44,16 @@ struct ContentView: View {
                 dismissButton: .default(Text("知道了"))
             )
         }
+        .sheet(isPresented: $showingScheduledRefresh) {
+            ScheduledRefreshSheet(scheduler: refreshScheduler)
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
+        .onChange(of: refreshScheduler.firedTarget) { target in
+            guard let target else { return }
+            performScheduledRefresh(target: target)
+            refreshScheduler.consumeFiredTarget(target)
+        }
     }
 
     private func pageStack() -> some View {
@@ -71,7 +84,7 @@ struct ContentView: View {
 
     private func pageSidebar(isCompact: Bool) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: isCompact ? 4 : 8) {
+            HStack(spacing: isCompact ? 2 : 8) {
                 if !isCompact {
                     Text("页面")
                         .font(.title3.weight(.semibold))
@@ -80,17 +93,42 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 }
 
-                Button(action: reloadAllPages) {
+                Button {
+                    reloadAllPages()
+                } label: {
                     Image(systemName: "arrow.clockwise")
-                        .frame(width: isCompact ? 24 : 28, height: 28)
+                        .frame(width: isCompact ? 22 : 28, height: 28)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("刷新所有页面")
                 .help("刷新所有已打开页面")
 
+                Button {
+                    showingScheduledRefresh = true
+                } label: {
+                    Image(
+                        systemName: refreshScheduler.targetDate == nil
+                            ? "clock.badge.plus"
+                            : "clock.fill"
+                    )
+                    .frame(width: isCompact ? 22 : 28, height: 28)
+                    .foregroundStyle(
+                        refreshScheduler.targetDate == nil
+                            ? Color.accentColor
+                            : Color.orange
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    refreshScheduler.targetDate == nil
+                        ? "设置定时刷新"
+                        : "查看定时刷新"
+                )
+                .help("设置到点刷新所有页面")
+
                 Button(action: addPage) {
                     Image(systemName: "plus")
-                        .frame(width: isCompact ? 24 : 28, height: 28)
+                        .frame(width: isCompact ? 22 : 28, height: 28)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("新增页面")
@@ -100,10 +138,40 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .padding(.horizontal, isCompact ? 8 : 12)
+            .padding(.horizontal, isCompact ? 5 : 12)
             .padding(.vertical, 9)
 
             Divider()
+
+            if refreshScheduler.targetDate != nil {
+                Button {
+                    showingScheduledRefresh = true
+                } label: {
+                    HStack(spacing: isCompact ? 4 : 7) {
+                        Image(systemName: "clock.fill")
+                            .font(.caption)
+                        Text(
+                            isCompact
+                                ? scheduledRefreshCountdown
+                                : "定时刷新  \(scheduledRefreshCountdown)"
+                        )
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .lineLimit(1)
+                        if !isCompact {
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.semibold))
+                        }
+                    }
+                    .foregroundStyle(Color.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, isCompact ? 7 : 12)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+
+                Divider()
+            }
 
             List {
                 ForEach(workspace.pages) { page in
@@ -180,12 +248,9 @@ struct ContentView: View {
             return
         }
 
-        for (index, page) in reloadablePages.enumerated() {
+        for page in reloadablePages {
             guard let url = page.surveyURL else { continue }
-            let delay = Double(index) * 0.05
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                _ = page.controller.reopenSurvey(url)
-            }
+            _ = page.controller.reopenSurvey(url)
         }
 
         if reloadablePages.count != workspace.pages.count {
@@ -196,8 +261,216 @@ struct ContentView: View {
         }
     }
 
+    private func performScheduledRefresh(target: Date) {
+        let lateness = Date().timeIntervalSince(target)
+        guard UIApplication.shared.applicationState == .active,
+              lateness >= -1,
+              lateness <= 5 else {
+            workspaceNotice = UserNotice(
+                title: "错过定时刷新",
+                message: "到达设定时间时 App 未保持前台，定时刷新已取消。"
+            )
+            return
+        }
+        reloadAllPages()
+    }
+
+    private var scheduledRefreshCountdown: String {
+        let total = max(refreshScheduler.remainingSeconds, 0)
+        let days = total / 86_400
+        let hours = (total % 86_400) / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        let clock = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        return days > 0 ? "\(days)天 \(clock)" : clock
+    }
+
     private func presetName(for page: SurveyPageSession) -> String {
         store.presets.first { $0.id == page.selectedPresetID }?.name ?? "未选预设"
+    }
+}
+
+private final class ScheduledPageRefreshScheduler: ObservableObject {
+    @Published private(set) var targetDate: Date?
+    @Published private(set) var remainingSeconds = 0
+    @Published private(set) var firedTarget: Date?
+
+    private var fireWorkItem: DispatchWorkItem?
+    private var countdownTimer: Timer?
+
+    deinit {
+        fireWorkItem?.cancel()
+        countdownTimer?.invalidate()
+    }
+
+    func schedule(at target: Date) {
+        cancel()
+        guard target > Date() else { return }
+
+        targetDate = target
+        updateRemainingSeconds()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.fire(expectedTarget: target)
+        }
+        fireWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(target.timeIntervalSinceNow, 0),
+            execute: workItem
+        )
+
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.updateRemainingSeconds()
+        }
+        countdownTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func cancel() {
+        fireWorkItem?.cancel()
+        fireWorkItem = nil
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        targetDate = nil
+        remainingSeconds = 0
+        firedTarget = nil
+    }
+
+    func consumeFiredTarget(_ target: Date) {
+        guard firedTarget == target else { return }
+        firedTarget = nil
+    }
+
+    private func fire(expectedTarget: Date) {
+        guard targetDate == expectedTarget else { return }
+        fireWorkItem = nil
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        targetDate = nil
+        remainingSeconds = 0
+        firedTarget = expectedTarget
+    }
+
+    private func updateRemainingSeconds() {
+        guard let targetDate else {
+            remainingSeconds = 0
+            return
+        }
+        remainingSeconds = max(Int(ceil(targetDate.timeIntervalSinceNow)), 0)
+    }
+}
+
+private struct ScheduledRefreshSheet: View {
+    @ObservedObject var scheduler: ScheduledPageRefreshScheduler
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedDate: Date
+    @State private var validationMessage: String?
+
+    init(scheduler: ScheduledPageRefreshScheduler) {
+        self.scheduler = scheduler
+        _selectedDate = State(
+            initialValue: scheduler.targetDate ?? Self.defaultTargetDate()
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let target = scheduler.targetDate {
+                    Section("当前定时") {
+                        LabeledContent(
+                            "执行时间",
+                            value: target.formatted(date: .abbreviated, time: .standard)
+                        )
+                        LabeledContent(
+                            "剩余时间",
+                            value: Self.countdownText(scheduler.remainingSeconds)
+                        )
+                    }
+                }
+
+                Section {
+                    DatePicker(
+                        "时间",
+                        selection: $selectedDate,
+                        in: Date()...,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+
+                    if let validationMessage {
+                        Text(validationMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button(scheduler.targetDate == nil ? "启动定时刷新" : "更新定时刷新") {
+                        scheduleRefresh()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                } header: {
+                    Text("设置刷新时间")
+                } footer: {
+                    Text("到点后刷新全部已打开页面，每个页面使用各自保存的网址。请保持 App 在前台；退出 App 后定时任务不会继续执行。")
+                }
+
+                if scheduler.targetDate != nil {
+                    Section {
+                        Button("取消定时刷新", role: .destructive) {
+                            scheduler.cancel()
+                            dismiss()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .navigationTitle("定时刷新")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func scheduleRefresh() {
+        let target = normalizedSelectedDate
+        guard target.timeIntervalSinceNow > 1 else {
+            validationMessage = "请选择晚于当前时间的日期和时间。"
+            return
+        }
+        validationMessage = nil
+        scheduler.schedule(at: target)
+        dismiss()
+    }
+
+    private var normalizedSelectedDate: Date {
+        let calendar = Calendar.current
+        var components = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: selectedDate
+        )
+        components.second = 0
+        return calendar.date(from: components) ?? selectedDate
+    }
+
+    private static func defaultTargetDate() -> Date {
+        Calendar.current.nextDate(
+            after: Date(),
+            matching: DateComponents(minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        ) ?? Date().addingTimeInterval(3_600)
+    }
+
+    private static func countdownText(_ seconds: Int) -> String {
+        let total = max(seconds, 0)
+        let days = total / 86_400
+        let hours = (total % 86_400) / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        let clock = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        return days > 0 ? "\(days)天 \(clock)" : clock
     }
 }
 
@@ -358,9 +631,7 @@ private struct SurveyPageView: View {
                             autoSubmitAfterFill: session.autoSubmitAfterFill,
                             submitDelaySeconds: session.submitDelaySeconds,
                             isSelected: isSelected,
-                            initialLoadDelaySeconds: isSelected
-                                ? 0
-                                : min(Double(max(session.pageNumber - 1, 0)) * 0.06, 0.6)
+                            initialLoadDelaySeconds: 0
                         )
                     }
                 } else {

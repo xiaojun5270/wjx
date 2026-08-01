@@ -4,7 +4,7 @@ import UIKit
 import WebKit
 
 private final class SurveyWebLoadGate {
-    static let shared = SurveyWebLoadGate(maximumConcurrentLoads: 2)
+    static let shared = SurveyWebLoadGate(maximumConcurrentLoads: Int.max)
 
     private struct PendingLoad {
         let id: UUID
