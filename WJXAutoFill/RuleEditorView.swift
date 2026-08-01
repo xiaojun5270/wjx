@@ -63,34 +63,41 @@ struct RuleEditorView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
 
-                    Toggle("填写随机邮箱", isOn: randomEmailEnabledBinding)
+                    TextField("邮箱域名，例如 example.com", text: randomEmailDomainBinding)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
 
-                    if store.randomEmailEnabled {
-                        TextField("邮箱域名，例如 example.com", text: randomEmailDomainBinding)
-                            .keyboardType(.URL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-
-                        Text("每次填写会生成类似 test_mabc123_xyz@example.com 的新地址。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("页面存在邮箱题时，每次生成新的随机邮箱；页面没有邮箱题时自动跳过。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } header: {
                     Text("固定提交内容")
                 } footer: {
-                    Text("邮箱可按预设单独开启或关闭。页面没有邮箱题时，启用邮箱也不会影响姓名和工号的填写。")
+                    Text("随机邮箱规则始终启用，只在页面检测到邮箱题时填写，不需要手动开关。")
                 }
 
                 Section {
                     if let index = store.selectedPresetIndex {
                         ForEach($store.presets[index].rules) { $rule in
-                            VStack(alignment: .leading, spacing: 10) {
-                                Toggle("启用", isOn: $rule.isEnabled)
-                                TextField("题目文字关键字，例如：姓名", text: $rule.questionContains)
-                                TextField("答案；多选或多个输入框用分号分隔", text: $rule.answer, axis: .vertical)
-                                    .lineLimit(1...4)
+                            if isFixedRule(rule.questionContains) {
+                                HStack {
+                                    Label(rule.questionContains, systemImage: "lock.fill")
+                                    Spacer()
+                                    Text(rule.questionContains.contains("邮箱") ? "自动随机" : "固定字段")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .deleteDisabled(true)
+                            } else {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Toggle("启用", isOn: $rule.isEnabled)
+                                    TextField("题目文字关键字", text: $rule.questionContains)
+                                    TextField("答案；多选或多个输入框用分号分隔", text: $rule.answer, axis: .vertical)
+                                        .lineLimit(1...4)
+                                }
+                                .padding(.vertical, 4)
                             }
-                            .padding(.vertical, 4)
                         }
                         .onDelete(perform: store.deleteRules)
                     }
@@ -160,17 +167,14 @@ struct RuleEditorView: View {
         )
     }
 
-    private var randomEmailEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { store.randomEmailEnabled },
-            set: { store.setRandomEmailEnabled($0) }
-        )
-    }
-
     private var randomEmailDomainBinding: Binding<String> {
         Binding(
             get: { store.randomEmailDomain },
             set: { store.setRandomEmailDomain($0) }
         )
+    }
+
+    private func isFixedRule(_ question: String) -> Bool {
+        ["姓名", "工号", "邮箱"].contains { question.contains($0) }
     }
 }

@@ -128,7 +128,7 @@ final class RuleStore: ObservableObject {
                         FillRule(
                             questionContains: "邮箱",
                             answer: Self.randomEmailToken(domain: Self.defaultEmailDomain),
-                            isEnabled: false
+                            isEnabled: true
                         )
                     ]
                 )
@@ -211,23 +211,6 @@ final class RuleStore: ObservableObject {
         presets[presetIndex].rules[ruleIndex].isEnabled = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    var randomEmailEnabled: Bool {
-        guard let presetIndex = selectedPresetIndex,
-              let ruleIndex = fixedRuleIndex(keyword: "邮箱", presetIndex: presetIndex) else {
-            return false
-        }
-        return presets[presetIndex].rules[ruleIndex].isEnabled
-    }
-
-    func setRandomEmailEnabled(_ enabled: Bool) {
-        guard let presetIndex = selectedPresetIndex else { return }
-        let ruleIndex = ensureFixedRule(keyword: "邮箱", presetIndex: presetIndex)
-        let currentDomain = Self.randomEmailDomain(from: presets[presetIndex].rules[ruleIndex].answer)
-            ?? Self.defaultEmailDomain
-        presets[presetIndex].rules[ruleIndex].answer = Self.randomEmailToken(domain: currentDomain)
-        presets[presetIndex].rules[ruleIndex].isEnabled = enabled
-    }
-
     var randomEmailDomain: String {
         guard let presetIndex = selectedPresetIndex,
               let ruleIndex = fixedRuleIndex(keyword: "邮箱", presetIndex: presetIndex) else {
@@ -269,7 +252,7 @@ final class RuleStore: ObservableObject {
             ? Self.randomEmailToken(domain: Self.defaultEmailDomain)
             : ""
         presets[presetIndex].rules.append(
-            FillRule(questionContains: keyword, answer: answer, isEnabled: false)
+            FillRule(questionContains: keyword, answer: answer, isEnabled: keyword == "邮箱")
         )
         return presets[presetIndex].rules.count - 1
     }
@@ -298,12 +281,13 @@ final class RuleStore: ObservableObject {
                 ?? legacyDomain
                 ?? defaultEmailDomain
             result.rules[emailIndex].answer = randomEmailToken(domain: domain)
+            result.rules[emailIndex].isEnabled = true
         } else {
             result.rules.append(
                 FillRule(
                     questionContains: "邮箱",
                     answer: randomEmailToken(domain: defaultEmailDomain),
-                    isEnabled: false
+                    isEnabled: true
                 )
             )
         }
