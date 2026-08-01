@@ -30,8 +30,19 @@ enum AutomationScript {
         return JSON.stringify({ status: 'closed', message: closeMessage, questions: [] });
       }
 
-      const captchaRoot = document.querySelector('#captchaOut, #captcha, #captchabtn');
-      if (captchaRoot && visible(captchaRoot) && clean(captchaRoot.innerText || captchaRoot.textContent)) {
+      const captchaText = ['请完成安全验证', '点击开始智能验证', '请先完成验证']
+        .some(message => pageText.includes(message));
+      const captchaCandidates = Array.from(document.querySelectorAll(
+        '#captchaOut, #captcha, #captchabtn, #captchaWrap, .captcha-wrap, .tcaptcha-transform, iframe[src*="captcha"], iframe[src*="verify"]'
+      ));
+      const visibleCaptcha = captchaCandidates.some(element => {
+        if (!visible(element)) return false;
+        const rect = element.getBoundingClientRect();
+        const hasFrame = element.matches('iframe') || !!element.querySelector?.('iframe');
+        const hasText = !!clean(element.innerText || element.textContent);
+        return hasFrame || hasText || rect.height >= 80;
+      });
+      if (captchaText || visibleCaptcha) {
         return JSON.stringify({ status: 'captcha', questions: [] });
       }
 
@@ -586,8 +597,15 @@ enum AutomationScript {
             return JSON.stringify({ status: 'empty' });
           }
 
-          notify({ type: 'started', completed: 0, succeeded: 0, failed: 0, active: 0, total });
           pump();
+          notify({
+            type: 'started',
+            completed: 0,
+            succeeded: 0,
+            failed: 0,
+            active: runner.active,
+            total
+          });
           return JSON.stringify({ status: 'started', total, concurrency });
         })()
         """#
@@ -628,8 +646,16 @@ enum AutomationScript {
       const closeMessage = closeMessages.find(message => pageText.includes(message));
       if (closeMessage) return JSON.stringify({ status: 'closed', message: closeMessage });
 
-      const captchaCandidates = Array.from(document.querySelectorAll('#captcha, #captchabtn, .captcha-wrap, iframe[src*="captcha"]'));
-      if (captchaCandidates.some(visible)) {
+      const captchaText = ['请完成安全验证', '点击开始智能验证', '请先完成验证']
+        .some(message => pageText.includes(message));
+      const captchaCandidates = Array.from(document.querySelectorAll(
+        '#captcha, #captchabtn, #captchaWrap, .captcha-wrap, .tcaptcha-transform, iframe[src*="captcha"], iframe[src*="verify"]'
+      ));
+      if (captchaText || captchaCandidates.some(element => {
+        if (!visible(element)) return false;
+        const rect = element.getBoundingClientRect();
+        return element.matches('iframe') || !!element.querySelector?.('iframe') || rect.height >= 80;
+      })) {
         return JSON.stringify({ status: 'captcha', message: '请先在页面中完成人机验证。' });
       }
 

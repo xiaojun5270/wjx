@@ -18,8 +18,8 @@ struct ContentView: View {
             Group {
                 if let url = store.surveyURL {
                     VStack(spacing: 0) {
-                        statusBar
-                        logBar
+                        statusHeader
+                        Divider()
                         SurveyWebView(
                             controller: webController,
                             url: url,
@@ -29,95 +29,32 @@ struct ContentView: View {
                         )
                     }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
-                        actionBar
+                        controlPanel
                     }
                 } else {
-                    VStack(spacing: 12) {
-                        Image(systemName: "link.badge.plus")
-                            .font(.system(size: 42))
-                            .foregroundStyle(.secondary)
-                        Text("问卷地址无效")
-                            .font(.title3.weight(.semibold))
-                        Text("请在规则设置中输入 wjx.cn 的 HTTPS 问卷地址。")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(30)
+                    invalidURLView
                 }
             }
             .navigationTitle("问卷助手")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        webController.goBack()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                    }
-                    .disabled(
-                        !webController.canGoBack || webController.isQueueRunning ||
-                        webController.isFilling || webController.isSubmitting
-                    )
-                    .help("返回上一页")
-                }
-
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button {
-                        showingLogs = true
-                    } label: {
-                        Image(systemName: "doc.text.magnifyingglass")
-                    }
-                    .help("运行日志")
-
-                    Button {
-                        webController.reload()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(
-                        store.surveyURL == nil || webController.isQueueRunning ||
-                        webController.isFilling || webController.isSubmitting
-                    )
-
-                    Button {
-                        showingRules = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
-                    .disabled(webController.isQueueRunning)
-                }
-            }
+            .toolbar { browserToolbar }
             .sheet(isPresented: $showingRules) {
                 RuleEditorView(store: store)
+                    .presentationDetents([.large])
             }
             .sheet(isPresented: $showingLogs) {
                 AutomationLogView(controller: webController)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
             }
-            .confirmationDialog("确认操作", isPresented: $showingConfirmation, titleVisibility: .visible) {
-                switch confirmationAction {
-                case .singleSubmit:
-                    Button("确认单次提交", role: .destructive) {
-                        webController.submitOnce()
-                    }
-                case .testQueue:
-                    Button("启动 10 组预设的后台并行提交", role: .destructive) {
-                        guard let url = store.surveyURL else { return }
-                        webController.startParallelTest(
-                            presets: store.queuePresets,
-                            surveyURL: url,
-                            concurrency: store.parallelConcurrency
-                        )
-                    }
-                }
-                Button("取消", role: .cancel) {}
+            .confirmationDialog(
+                confirmationTitle,
+                isPresented: $showingConfirmation,
+                titleVisibility: .visible
+            ) {
+                confirmationButtons
             } message: {
-                switch confirmationAction {
-                case .singleSubmit:
-                    Text("请先核对页面中的所有答案。此操作只触发一次提交。")
-                case .testQueue:
-                    Text("应用会在隐藏页面中同时启动 10 个填写和提交任务。请仅用于你获授权的测试问卷。")
-                }
+                Text(confirmationMessage)
             }
             .alert(item: $webController.notice) { notice in
                 Alert(
@@ -129,239 +66,604 @@ struct ContentView: View {
         }
     }
 
-    private var statusBar: some View {
-        HStack(spacing: 8) {
-            Image(systemName: statusIcon)
-            Text(statusText)
-                .font(.footnote)
-                .lineLimit(2)
-            Spacer(minLength: 0)
+    @ToolbarContentBuilder
+    private var browserToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarLeading) {
+            Button {
+                webController.goBack()
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(!webController.canGoBack || webController.isBusy)
+            .help("返回")
         }
-        .foregroundStyle(statusColor)
+
+        ToolbarItemGroup(placement: .navigationBarTrailing) {
+            Button {
+                webController.reload()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .disabled(store.surveyURL == nil || webController.isBusy)
+            .help("重新加载")
+
+            Button {
+                showingLogs = true
+            } label: {
+                Image(systemName: "list.bullet.rectangle")
+            }
+            .help("运行日志")
+
+            Button {
+                showingRules = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .disabled(webController.isBusy)
+            .help("问卷与预设")
+        }
+    }
+
+    private var statusHeader: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 11) {
+                ZStack {
+                    Circle()
+                        .fill(statusColor.opacity(0.14))
+                    Image(systemName: statusIcon)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(statusColor)
+                }
+                .frame(width: 32, height: 32)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(statusTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(statusDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 8)
+
+                if webController.isFilling || webController.isWaitingToSubmit ||
+                    webController.isSubmitting || webController.isQueueRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if case .ready(let count) = webController.state {
+                    Text("\(count) 题")
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if webController.isQueueRunning {
+                ProgressView(value: webController.queueSnapshot.progress)
+                    .tint(statusColor)
+            }
+        }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity)
-        .background(statusColor.opacity(0.10))
+        .background(Color(uiColor: .systemBackground))
+        .animation(.easeInOut(duration: 0.2), value: webController.queueSnapshot.progress)
     }
 
-    private var logBar: some View {
-        Button {
-            showingLogs = true
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "text.alignleft")
-                Text(webController.logs.last?.message ?? "等待运行日志")
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-            }
-            .font(.caption)
-            .foregroundStyle(logColor(webController.logs.last?.level))
-            .padding(.horizontal, 14)
-            .frame(height: 32)
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(Color(uiColor: .secondarySystemBackground))
-    }
+    private var controlPanel: some View {
+        VStack(spacing: 0) {
+            Divider()
+            presetAndLogRow
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
 
-    private var actionBar: some View {
-        VStack(spacing: 9) {
+            Divider()
+
             if webController.isQueueRunning {
-                HStack {
-                    ProgressView()
-                    Text(queueProgressText)
-                        .font(.footnote)
-                    Spacer()
-                    Button("停止", role: .destructive) {
-                        webController.stopTestQueue()
-                    }
-                    .buttonStyle(.bordered)
-                }
+                runningQueueControls
             } else {
-                HStack(spacing: 12) {
-                    Button {
-                        if store.autoSubmitAfterFill {
-                            webController.fillAndSubmit(rules: store.selectedPreset?.rules ?? [])
-                        } else {
-                            webController.fill(rules: store.selectedPreset?.rules ?? [])
-                        }
-                    } label: {
-                        Label(
-                            store.autoSubmitAfterFill ? "填写并提交" : "自动填写",
-                            systemImage: "wand.and.stars"
-                        )
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(webController.isFilling || webController.isSubmitting)
+                singleControls
+            }
+        }
+        .background(.regularMaterial)
+    }
 
-                    Button {
-                        confirmationAction = .singleSubmit
-                        showingConfirmation = true
-                    } label: {
-                        Label(webController.isSubmitting ? "提交中" : "核对并提交", systemImage: "paperplane.fill")
-                            .frame(maxWidth: .infinity)
+    private var presetAndLogRow: some View {
+        HStack(spacing: 10) {
+            Menu {
+                Picker("当前预设", selection: $store.selectedPresetID) {
+                    ForEach(store.presets) { preset in
+                        Label(
+                            preset.name,
+                            systemImage: preset.isQueueReady ? "checkmark.circle.fill" : "circle"
+                        )
+                        .tag(preset.id)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!webController.canAttemptSubmit)
                 }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.text.rectangle")
+                    Text(store.selectedPreset?.name ?? "选择预设")
+                        .font(.subheadline.weight(.medium))
+                    Text("\(store.selectedPreset?.completedFieldCount ?? 0)/3")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.primary)
+            }
+            .disabled(webController.isBusy)
+
+            Spacer(minLength: 4)
+
+            Button {
+                showingLogs = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: latestLogIcon)
+                        .foregroundStyle(latestLogColor)
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(webController.logs.last?.category.rawValue ?? "日志")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(webController.logs.last?.title ?? "暂无记录")
+                            .font(.caption)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: 190, alignment: .trailing)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var singleControls: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                Button {
+                    if store.autoSubmitAfterFill {
+                        webController.fillAndSubmit(rules: store.selectedPreset?.rules ?? [])
+                    } else {
+                        webController.fill(rules: store.selectedPreset?.rules ?? [])
+                    }
+                } label: {
+                    Label(fillButtonTitle, systemImage: "wand.and.stars")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!webController.canAttemptFill)
 
                 Button {
-                    confirmationAction = .testQueue
+                    confirmationAction = .singleSubmit
                     showingConfirmation = true
                 } label: {
-                    Label("同时提交 10 组预设（已填 \(store.queuePresets.count)/10）", systemImage: "person.2.fill")
+                    Label("仅提交", systemImage: "paperplane.fill")
+                        .lineLimit(1)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .disabled(!canStartQueue)
+                .disabled(!webController.canAttemptSubmit)
             }
+
+            Button {
+                confirmationAction = .testQueue
+                showingConfirmation = true
+            } label: {
+                HStack {
+                    Label("并行提交 10 组", systemImage: "rectangle.3.group.fill")
+                    Spacer()
+                    Text(batchReadinessText)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!canStartQueue)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.ultraThinMaterial)
     }
 
-    private var statusText: String {
+    private var runningQueueControls: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 14) {
+                queueMetric("成功", value: webController.queueSnapshot.succeeded, color: .green)
+                queueMetric("失败", value: webController.queueSnapshot.failed, color: .red)
+                queueMetric("运行中", value: webController.queueSnapshot.active, color: .blue)
+                Spacer(minLength: 4)
+                Text("\(webController.queueSnapshot.completed)/\(webController.queueSnapshot.total)")
+                    .font(.subheadline.monospacedDigit().weight(.semibold))
+            }
+
+            Button(role: .destructive) {
+                webController.stopTestQueue()
+            } label: {
+                Label("停止批量任务", systemImage: "stop.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func queueMetric(_ title: String, value: Int, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text("\(title) \(value)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var invalidURLView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "link.badge.plus")
+                .font(.system(size: 38, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("问卷地址无效")
+                .font(.headline)
+            Text("请输入 wjx.cn 的 HTTPS 问卷地址")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Button {
+                showingRules = true
+            } label: {
+                Label("打开设置", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    @ViewBuilder
+    private var confirmationButtons: some View {
+        switch confirmationAction {
+        case .singleSubmit:
+            Button("提交当前页面", role: .destructive) {
+                webController.submitOnce()
+            }
+        case .testQueue:
+            Button("启动 10 个并行任务", role: .destructive) {
+                guard let url = store.surveyURL else { return }
+                webController.startParallelTest(
+                    presets: store.queuePresets,
+                    surveyURL: url,
+                    concurrency: store.parallelConcurrency
+                )
+            }
+        }
+        Button("取消", role: .cancel) {}
+    }
+
+    private var confirmationTitle: String {
+        switch confirmationAction {
+        case .singleSubmit: return "确认提交"
+        case .testQueue: return "确认批量提交"
+        }
+    }
+
+    private var confirmationMessage: String {
+        switch confirmationAction {
+        case .singleSubmit:
+            return "将提交当前页面中的答案，仅执行一次。"
+        case .testQueue:
+            return "将同时启动 10 个隐藏任务。遇到安全验证或问卷关闭时会停止。"
+        }
+    }
+
+    private var fillButtonTitle: String {
+        if webController.isFilling { return "填写中" }
+        if webController.isWaitingToSubmit { return "等待提交" }
+        if webController.isSubmitting { return "提交中" }
+        return store.autoSubmitAfterFill ? "填写并提交" : "自动填写"
+    }
+
+    private var batchReadinessText: String {
+        store.parallelValidationMessage ?? "已就绪"
+    }
+
+    private var canStartQueue: Bool {
+        guard store.isParallelReady, store.surveyURL != nil, !webController.isBusy else { return false }
+        switch webController.state {
+        case .ready(_), .submitted(_): return true
+        default: return false
+        }
+    }
+
+    private var statusTitle: String {
+        if webController.isQueueRunning { return "批量任务进行中" }
+        if webController.isFilling { return "正在填写当前预设" }
+        if webController.isWaitingToSubmit { return "等待自动提交" }
+        if webController.isSubmitting { return "正在提交问卷" }
+
         switch webController.queueState {
-        case .running(let current, let total, let presetName):
-            return "后台并行 \(current)/\(total)：\(presetName)"
-        case .completed(let total):
-            return "后台并行测试完成：成功 \(total) 个预设"
+        case .completed: return "批量任务已完成"
+        case .stopped: return "批量任务已停止"
+        case .idle, .running: break
+        }
+
+        switch webController.state {
+        case .loading: return "正在加载问卷"
+        case .ready: return "问卷已就绪"
+        case .submitted: return "提交已完成"
+        case .closed: return "问卷不可填写"
+        case .captchaRequired: return "需要安全验证"
+        case .failed: return "页面加载失败"
+        }
+    }
+
+    private var statusDetail: String {
+        if webController.isQueueRunning {
+            let snapshot = webController.queueSnapshot
+            return "已完成 \(snapshot.completed)/\(snapshot.total) · \(snapshot.detail)"
+        }
+        if webController.isFilling {
+            return "使用 \(store.selectedPreset?.name ?? "当前预设")"
+        }
+        if webController.isWaitingToSubmit { return "填写完成，2 秒后提交" }
+        if webController.isSubmitting { return "等待问卷星返回结果" }
+
+        switch webController.queueState {
+        case .completed:
+            let snapshot = webController.queueSnapshot
+            return "成功 \(snapshot.succeeded) · 失败 \(snapshot.failed) · 共 \(snapshot.total)"
         case .stopped(let message):
-            return "后台并行测试已停止：\(message)"
-        case .idle:
+            return message
+        case .idle, .running:
             break
         }
 
         switch webController.state {
         case .loading:
-            return "正在加载并检查问卷…"
+            return store.surveyURL?.host ?? "正在连接"
         case .ready(let count):
-            return count > 0 ? "页面可填写，检测到 \(count) 道题" : "页面已加载，尚未检测到可填写题目"
-        case .submitted(let message):
-            return "提交完成：\(message)"
-        case .closed(let message):
-            return "问卷不可填写：\(message)"
+            return "检测到 \(count) 道可填写题目"
+        case .submitted(let message), .closed(let message), .failed(let message):
+            return message
         case .captchaRequired:
-            return "需要在页面中手动完成人机验证"
-        case .failed(let message):
-            return "页面加载失败：\(message)"
+            return "请在当前页面完成验证后继续"
         }
     }
 
     private var statusIcon: String {
+        if webController.isQueueRunning { return "arrow.triangle.2.circlepath" }
+        if webController.isFilling { return "wand.and.stars" }
+        if webController.isWaitingToSubmit { return "timer" }
+        if webController.isSubmitting { return "paperplane.fill" }
+
         switch webController.queueState {
-        case .running(_, _, _): return "arrow.triangle.2.circlepath"
-        case .completed(_): return "checkmark.circle"
-        case .stopped(_): return "stop.circle"
-        case .idle: break
+        case .completed: return "checkmark.circle.fill"
+        case .stopped: return "stop.circle.fill"
+        case .idle, .running: break
         }
 
         switch webController.state {
         case .loading: return "hourglass"
-        case .ready(_), .submitted(_): return "checkmark.circle"
-        case .closed(_): return "xmark.octagon"
-        case .captchaRequired: return "person.badge.key"
-        case .failed(_): return "wifi.exclamationmark"
+        case .ready: return "checkmark.circle.fill"
+        case .submitted: return "checkmark.seal.fill"
+        case .closed: return "xmark.octagon.fill"
+        case .captchaRequired: return "person.badge.key.fill"
+        case .failed: return "wifi.exclamationmark"
         }
     }
 
     private var statusColor: Color {
+        if webController.isQueueRunning || webController.isFilling ||
+            webController.isWaitingToSubmit || webController.isSubmitting {
+            return .blue
+        }
+
         switch webController.queueState {
-        case .running(_, _, _): return .blue
-        case .completed(_): return .green
-        case .stopped(_): return .red
-        case .idle: break
+        case .completed:
+            return webController.queueSnapshot.failed == 0 ? .green : .orange
+        case .stopped: return .orange
+        case .idle, .running: break
         }
 
         switch webController.state {
         case .loading: return .secondary
-        case .ready(_), .submitted(_): return .green
-        case .closed(_), .failed(_): return .red
+        case .ready, .submitted: return .green
+        case .closed, .failed: return .red
         case .captchaRequired: return .orange
         }
     }
 
-    private var canStartQueue: Bool {
-        guard store.isParallelReady, store.surveyURL != nil,
-              !webController.isFilling, !webController.isSubmitting else { return false }
-        switch webController.state {
-        case .ready(_), .submitted(_):
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func logColor(_ level: AutomationLogLevel?) -> Color {
-        switch level {
+    private var latestLogColor: Color {
+        switch webController.logs.last?.level {
         case .success: return .green
         case .warning: return .orange
         case .error: return .red
-        case .info, .none: return .secondary
+        case .info, .none: return .blue
         }
     }
 
-    private var queueProgressText: String {
-        if case .running(let current, let total, let presetName) = webController.queueState {
-            return "\(current)/\(total) · \(presetName)"
+    private var latestLogIcon: String {
+        switch webController.logs.last?.level {
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error: return "xmark.octagon.fill"
+        case .info, .none: return "info.circle.fill"
         }
-        return "后台并行测试运行中"
     }
 }
 
 private struct AutomationLogView: View {
+    private enum Filter: String, CaseIterable, Identifiable {
+        case all = "全部"
+        case success = "成功"
+        case warning = "警告"
+        case error = "失败"
+
+        var id: String { rawValue }
+    }
+
     @ObservedObject var controller: SurveyWebController
     @Environment(\.dismiss) private var dismiss
+    @State private var filter: Filter = .all
+    @State private var searchText = ""
 
     var body: some View {
         NavigationStack {
-            List {
-                if controller.logs.isEmpty {
-                    Text("暂无运行日志")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(controller.logs.reversed())) { entry in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: iconName(for: entry.level))
-                                .foregroundStyle(color(for: entry.level))
-                                .frame(width: 18)
+            VStack(spacing: 0) {
+                logSummary
 
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(entry.message)
-                                    .font(.subheadline)
-                                Text(entry.timestamp.formatted(date: .omitted, time: .standard))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 2)
+                Picker("日志级别", selection: $filter) {
+                    ForEach(Filter.allCases) { item in
+                        Text(item.rawValue).tag(item)
                     }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                Divider()
+
+                if filteredLogs.isEmpty {
+                    emptyLogView
+                } else {
+                    List(filteredLogs.reversed()) { entry in
+                        logRow(entry)
+                    }
+                    .listStyle(.plain)
                 }
             }
             .navigationTitle("运行日志")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "搜索日志")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                 }
-                ToolbarItem(placement: .destructiveAction) {
-                    Button("清空", role: .destructive) {
-                        controller.clearLogs()
+
+                ToolbarItemGroup(placement: .primaryAction) {
+                    ShareLink(item: controller.logExportText) {
+                        Image(systemName: "square.and.arrow.up")
                     }
                     .disabled(controller.logs.isEmpty)
+                    .help("导出日志")
+
+                    Button(role: .destructive) {
+                        controller.clearLogs()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(controller.logs.isEmpty)
+                    .help("清空日志")
                 }
             }
         }
     }
 
+    private var logSummary: some View {
+        HStack(spacing: 0) {
+            summaryMetric("总计", count: controller.logs.count, color: .primary)
+            summaryMetric("成功", count: count(for: .success), color: .green)
+            summaryMetric("警告", count: count(for: .warning), color: .orange)
+            summaryMetric("失败", count: count(for: .error), color: .red)
+        }
+        .padding(.vertical, 11)
+        .background(Color(uiColor: .secondarySystemBackground))
+    }
+
+    private func summaryMetric(_ title: String, count: Int, color: Color) -> some View {
+        VStack(spacing: 2) {
+            Text("\(count)")
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(color)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var emptyLogView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: searchText.isEmpty ? "doc.text" : "magnifyingglass")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(.secondary)
+            Text(searchText.isEmpty ? "暂无日志" : "没有匹配的日志")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func logRow(_ entry: AutomationLogEntry) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: iconName(for: entry.level))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(color(for: entry.level))
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Text(entry.category.rawValue)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(color(for: entry.level))
+                    Text(entry.timestamp.formatted(date: .omitted, time: .standard))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(entry.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+
+                if let detail = entry.detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var filteredLogs: [AutomationLogEntry] {
+        controller.logs.filter { entry in
+            let matchesLevel: Bool
+            switch filter {
+            case .all: matchesLevel = true
+            case .success: matchesLevel = entry.level == .success
+            case .warning: matchesLevel = entry.level == .warning
+            case .error: matchesLevel = entry.level == .error
+            }
+
+            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchesSearch = query.isEmpty ||
+                entry.message.localizedCaseInsensitiveContains(query) ||
+                entry.category.rawValue.localizedCaseInsensitiveContains(query)
+            return matchesLevel && matchesSearch
+        }
+    }
+
+    private func count(for level: AutomationLogLevel) -> Int {
+        controller.logs.filter { $0.level == level }.count
+    }
+
     private func iconName(for level: AutomationLogLevel) -> String {
         switch level {
-        case .info: return "info.circle"
+        case .info: return "info.circle.fill"
         case .success: return "checkmark.circle.fill"
         case .warning: return "exclamationmark.triangle.fill"
         case .error: return "xmark.octagon.fill"

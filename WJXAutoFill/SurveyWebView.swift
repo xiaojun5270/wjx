@@ -8,7 +8,9 @@ final class SurveyWebController: ObservableObject {
     @Published var notice: UserNotice?
     @Published private(set) var isFilling = false
     @Published private(set) var isSubmitting = false
+    @Published private(set) var isWaitingToSubmit = false
     @Published private(set) var queueState: TestQueueState = .idle
+    @Published private(set) var queueSnapshot = ParallelRunSnapshot()
     @Published private(set) var canGoBack = false
     @Published private(set) var logs: [AutomationLogEntry] = []
 
@@ -18,6 +20,7 @@ final class SurveyWebController: ObservableObject {
     private var parallelRunID: String?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var hasAutoSubmittedCurrentForm = false
+    private var pendingAutoSubmitWorkItem: DispatchWorkItem?
 
     private enum FillEvaluation {
         case success(matched: Int, filled: Int)
@@ -29,11 +32,28 @@ final class SurveyWebController: ObservableObject {
         queueSessionID != nil
     }
 
-    var canAttemptSubmit: Bool {
-        guard !isFilling, !isSubmitting else { return false }
+    var isBusy: Bool {
+        isFilling || isWaitingToSubmit || isSubmitting || isQueueRunning
+    }
+
+    var canAttemptFill: Bool {
+        guard !isBusy else { return false }
         if case .ready(_) = state { return true }
-        if case .captchaRequired = state { return true }
         return false
+    }
+
+    var canAttemptSubmit: Bool {
+        guard !isBusy else { return false }
+        if case .ready(_) = state { return true }
+        return false
+    }
+
+    var logExportText: String {
+        logs.map { entry in
+            let time = entry.timestamp.formatted(date: .numeric, time: .standard)
+            return "[\(time)] [\(entry.category.rawValue)] [\(entry.level.displayName)] \(entry.message)"
+        }
+        .joined(separator: "\n")
     }
 
     func clearLogs() {
@@ -41,29 +61,32 @@ final class SurveyWebController: ObservableObject {
     }
 
     func reload() {
+        cancelPendingAutoSubmit()
         if !isQueueRunning {
             queueState = .idle
         }
         hasAutoSubmittedCurrentForm = false
         canGoBack = false
         state = .loading
-        appendLog("重新加载问卷页面。")
+        appendLog("重新加载问卷页面。", category: .page)
         webView?.reload()
     }
 
     func goBack() {
-        guard !isQueueRunning, !isFilling, !isSubmitting,
+        guard !isBusy,
               let webView, webView.canGoBack else { return }
+        cancelPendingAutoSubmit()
         hasAutoSubmittedCurrentForm = false
         state = .loading
-        appendLog("返回上一页。")
+        appendLog("返回上一页。", category: .page)
         webView.goBack()
     }
 
     func fill(rules: [FillRule], silent: Bool = false) {
-        guard !isFilling, !isSubmitting else { return }
+        guard canAttemptFill else { return }
+        resetQueueSummary()
         isFilling = true
-        appendLog("开始自动填写。")
+        appendLog("开始自动填写。", category: .fill)
         evaluateFill(rules: rules) { [weak self] evaluation in
             guard let self else { return }
             self.isFilling = false
@@ -71,7 +94,8 @@ final class SurveyWebController: ObservableObject {
             case .success(let matched, let filled):
                 self.appendLog(
                     "自动填写完成：匹配 \(matched) 条规则，填写 \(filled) 个控件。",
-                    level: filled > 0 ? .success : .warning
+                    level: filled > 0 ? .success : .warning,
+                    category: .fill
                 )
                 if !silent {
                     self.notice = UserNotice(
@@ -81,12 +105,12 @@ final class SurveyWebController: ObservableObject {
                 }
             case .closed(let message):
                 self.state = .closed(message)
-                self.appendLog("问卷不可填写：\(message)", level: .warning)
+                self.appendLog("问卷不可填写：\(message)", level: .warning, category: .fill)
                 if !silent {
                     self.notice = UserNotice(title: "问卷不可提交", message: message)
                 }
             case .failed(let message):
-                self.appendLog("自动填写失败：\(message)", level: .error)
+                self.appendLog("自动填写失败：\(message)", level: .error, category: .fill)
                 if !silent {
                     self.notice = UserNotice(title: "自动填写失败", message: message)
                 }
@@ -95,10 +119,11 @@ final class SurveyWebController: ObservableObject {
     }
 
     func fillAndSubmit(rules: [FillRule], silent: Bool = false) {
-        guard !isFilling, !isSubmitting else { return }
+        guard canAttemptFill else { return }
+        resetQueueSummary()
         isFilling = true
         hasAutoSubmittedCurrentForm = true
-        appendLog("开始自动填写，完成后将自动提交。")
+        appendLog("开始自动填写，完成后将自动提交。", category: .fill)
         evaluateFill(rules: rules) { [weak self] evaluation in
             guard let self else { return }
             self.isFilling = false
@@ -106,7 +131,8 @@ final class SurveyWebController: ObservableObject {
             case .success(let matched, let filled):
                 self.appendLog(
                     "自动填写完成：匹配 \(matched) 条规则，填写 \(filled) 个控件。",
-                    level: filled > 0 ? .success : .warning
+                    level: filled > 0 ? .success : .warning,
+                    category: .fill
                 )
                 guard filled > 0 else {
                     if !silent {
@@ -115,20 +141,17 @@ final class SurveyWebController: ObservableObject {
                     return
                 }
 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    guard !self.isQueueRunning else { return }
-                    self.submitOnce(showScheduledNotice: !silent, source: "自动提交")
-                }
+                self.scheduleAutoSubmit(showScheduledNotice: !silent)
 
             case .closed(let message):
                 self.state = .closed(message)
-                self.appendLog("问卷不可填写：\(message)", level: .warning)
+                self.appendLog("问卷不可填写：\(message)", level: .warning, category: .fill)
                 if !silent {
                     self.notice = UserNotice(title: "问卷不可提交", message: message)
                 }
 
             case .failed(let message):
-                self.appendLog("自动填写失败：\(message)", level: .error)
+                self.appendLog("自动填写失败：\(message)", level: .error, category: .fill)
                 if !silent {
                     self.notice = UserNotice(title: "自动填写失败", message: message)
                 }
@@ -141,16 +164,16 @@ final class SurveyWebController: ObservableObject {
         surveyURL: URL,
         concurrency: Int
     ) {
-        guard !isQueueRunning, !isFilling, !isSubmitting else { return }
+        guard !isBusy else { return }
         guard let webView else {
-            appendLog("并行提交启动失败：问卷页面尚未加载。", level: .error)
+            appendLog("并行提交启动失败：问卷页面尚未加载。", level: .error, category: .batch)
             notice = UserNotice(title: "无法启动测试", message: "问卷页面尚未加载。")
             return
         }
 
         let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(RuleStore.presetCount))
         guard usablePresets.count == RuleStore.presetCount else {
-            appendLog("并行提交启动失败：10 组预设未填写完整。", level: .warning)
+            appendLog("并行提交启动失败：10 组预设未填写完整。", level: .warning, category: .batch)
             notice = UserNotice(title: "预设未填写完整", message: "请先完整填写 10 组不同的姓名、工号和固定邮箱。")
             return
         }
@@ -158,7 +181,7 @@ final class SurveyWebController: ObservableObject {
         for keyword in SubmissionPreset.requiredQuestions {
             let values = usablePresets.map { $0.answer(for: keyword).lowercased() }
             guard Set(values).count == RuleStore.presetCount else {
-                appendLog("并行提交启动失败：10 组预设的\(keyword)存在重复。", level: .warning)
+                appendLog("并行提交启动失败：10 组预设的\(keyword)存在重复。", level: .warning, category: .batch)
                 notice = UserNotice(title: "预设内容重复", message: "10 组预设的\(keyword)必须各不相同。")
                 return
             }
@@ -172,7 +195,7 @@ final class SurveyWebController: ObservableObject {
             concurrency: concurrency,
             runID: runID
         ) else {
-            appendLog("并行提交启动失败：无法生成后台任务。", level: .error)
+            appendLog("并行提交启动失败：无法生成后台任务。", level: .error, category: .batch)
             notice = UserNotice(title: "无法启动测试", message: "生成后台任务失败。")
             return
         }
@@ -181,7 +204,15 @@ final class SurveyWebController: ObservableObject {
         queueSessionID = sessionID
         parallelRunID = runID
         queueState = .running(current: 0, total: usablePresets.count, presetName: "正在启动后台任务")
-        appendLog("启动 \(usablePresets.count) 个并行填写和提交任务。")
+        queueSnapshot = ParallelRunSnapshot(
+            completed: 0,
+            total: usablePresets.count,
+            succeeded: 0,
+            failed: 0,
+            active: 0,
+            detail: "正在启动后台任务"
+        )
+        appendLog("启动 \(usablePresets.count) 个并行填写和提交任务。", category: .batch)
         beginBackgroundExecution()
 
         webView.evaluateJavaScript(script) { [weak self] result, error in
@@ -210,75 +241,55 @@ final class SurveyWebController: ObservableObject {
     }
 
     func submitOnce(showScheduledNotice: Bool = true, source: String = "手动提交") {
-        guard !isFilling, !isSubmitting else { return }
+        guard !isBusy else { return }
+        resetQueueSummary()
         guard let webView else {
-            appendLog("\(source)失败：问卷页面尚未加载。", level: .error)
+            appendLog("\(source)失败：问卷页面尚未加载。", level: .error, category: .submit)
             notice = UserNotice(title: "提交失败", message: "问卷页面尚未加载。")
             return
         }
-        appendLog("正在执行\(source)。")
+        appendLog("正在执行\(source)。", category: .submit)
         isSubmitting = true
         webView.evaluateJavaScript(AutomationScript.submit) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let error {
                     self.isSubmitting = false
-                    self.appendLog("\(source)失败：\(error.localizedDescription)", level: .error)
+                    self.appendLog("\(source)失败：\(error.localizedDescription)", level: .error, category: .submit)
                     self.notice = UserNotice(title: "提交失败", message: error.localizedDescription)
                     return
                 }
                 guard let payload = Self.dictionary(from: result),
                       let status = payload["status"] as? String else {
                     self.isSubmitting = false
-                    self.appendLog("\(source)失败：页面没有返回有效状态。", level: .error)
+                    self.appendLog("\(source)失败：页面没有返回有效状态。", level: .error, category: .submit)
                     self.notice = UserNotice(title: "提交失败", message: "页面没有返回有效状态。")
                     return
                 }
                 switch status {
                 case "scheduled":
-                    self.appendLog("已触发\(source)，正在等待页面结果。")
+                    self.appendLog("已触发\(source)，正在等待页面结果。", category: .submit)
                     if showScheduledNotice {
                         self.notice = UserNotice(title: "已触发提交", message: "请留意页面返回结果；如果出现验证码，请在页面中手动完成。")
                     }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        if self.webView?.isLoading == false {
-                            self.scanPage { [weak self] state in
-                                guard let self else { return }
-                                switch state {
-                                case .ready(_):
-                                    self.appendLog("\(source)未完成：页面仍停留在问卷，可能存在必填项或格式错误。", level: .warning)
-                                    self.notice = UserNotice(
-                                        title: "提交未完成",
-                                        message: "页面仍停留在问卷，请检查必填项和格式提示。"
-                                    )
-                                case .captchaRequired:
-                                    self.notice = UserNotice(
-                                        title: "需要人机验证",
-                                        message: "请先在问卷页面中手动完成验证。"
-                                    )
-                                case .failed(let message):
-                                    self.notice = UserNotice(title: "提交结果检查失败", message: message)
-                                default:
-                                    break
-                                }
-                            }
-                        }
+                        self.inspectSingleSubmitResult(source: source, attempt: 1)
                     }
                 case "captcha":
                     self.isSubmitting = false
                     self.state = .captchaRequired
-                    self.appendLog("\(source)暂停：页面要求人机验证。", level: .warning)
+                    self.appendLog("\(source)暂停：页面要求人机验证。", level: .warning, category: .security)
                     self.notice = UserNotice(title: "需要人机验证", message: "应用不会绕过验证码，请先在问卷页面中手动完成验证。")
                 case "closed":
                     self.isSubmitting = false
                     let message = payload["message"] as? String ?? "问卷当前不可提交。"
                     self.state = .closed(message)
-                    self.appendLog("\(source)失败：\(message)", level: .warning)
+                    self.appendLog("\(source)失败：\(message)", level: .warning, category: .submit)
                     self.notice = UserNotice(title: "问卷不可提交", message: message)
                 default:
                     self.isSubmitting = false
                     let message = payload["message"] as? String ?? "当前页面没有可用的提交按钮。"
-                    self.appendLog("\(source)失败：\(message)", level: .error)
+                    self.appendLog("\(source)失败：\(message)", level: .error, category: .submit)
                     self.notice = UserNotice(
                         title: "无法提交",
                         message: message
@@ -289,17 +300,22 @@ final class SurveyWebController: ObservableObject {
     }
 
     fileprivate func prepareForNewSurvey(_ url: URL) {
+        cancelPendingAutoSubmit()
+        resetQueueSummary()
+        isFilling = false
+        isSubmitting = false
         hasAutoSubmittedCurrentForm = false
         canGoBack = false
         state = .loading
-        appendLog("打开问卷：\(url.absoluteString)")
+        appendLog("打开问卷：\(url.absoluteString)", category: .page)
     }
 
     fileprivate func handleNavigationStarted(in webView: WKWebView) {
+        cancelPendingAutoSubmit()
         state = .loading
         canGoBack = false
         if let url = webView.url {
-            appendLog("正在加载页面：\(url.absoluteString)")
+            appendLog("正在加载页面：\(url.absoluteString)", category: .page)
         }
     }
 
@@ -330,8 +346,11 @@ final class SurveyWebController: ObservableObject {
 
     fileprivate func handleNavigationFailure(_ error: Error) {
         let message = error.localizedDescription
+        cancelPendingAutoSubmit()
+        isFilling = false
+        isSubmitting = false
         state = .failed(message)
-        appendLog("页面加载失败：\(message)", level: .error)
+        appendLog("页面加载失败：\(message)", level: .error, category: .page)
         if isQueueRunning {
             stopQueue(message: "页面加载失败：\(message)", showNotice: true)
         }
@@ -355,22 +374,47 @@ final class SurveyWebController: ObservableObject {
 
         switch type {
         case "started":
-            queueState = .running(current: completed, total: total, presetName: "正在调度后台任务")
-            appendLog("并行任务已启动：共 \(total) 个。")
+            let detail = active > 0 ? "已启动 \(active) 个任务" : "正在调度后台任务"
+            queueState = .running(current: completed, total: total, presetName: detail)
+            queueSnapshot = ParallelRunSnapshot(
+                completed: completed,
+                total: total,
+                succeeded: succeeded,
+                failed: failed,
+                active: active,
+                detail: detail
+            )
+            appendLog("并行任务已启动：共 \(total) 个。", category: .batch)
 
         case "progress":
             let detail = active > 0 ? "并行运行 \(active) 个任务" : "正在调度任务"
             queueState = .running(current: completed, total: total, presetName: detail)
+            queueSnapshot = ParallelRunSnapshot(
+                completed: completed,
+                total: total,
+                succeeded: succeeded,
+                failed: failed,
+                active: active,
+                detail: presetName
+            )
             if taskError.isEmpty {
-                appendLog("\(presetName)提交完成；总进度 \(completed)/\(total)。", level: .success)
+                appendLog("\(presetName)提交完成；总进度 \(completed)/\(total)。", level: .success, category: .batch)
             } else {
-                appendLog("\(presetName)提交失败：\(taskError)", level: .error)
+                appendLog("\(presetName)提交失败：\(taskError)", level: .error, category: .batch)
             }
 
         case "complete":
             clearQueueSession()
             queueState = .completed(total: succeeded)
-            appendLog("并行提交完成：成功 \(succeeded)，失败 \(failed)。", level: failed == 0 ? .success : .warning)
+            queueSnapshot = ParallelRunSnapshot(
+                completed: total,
+                total: total,
+                succeeded: succeeded,
+                failed: failed,
+                active: 0,
+                detail: "全部任务已完成"
+            )
+            appendLog("并行提交完成：成功 \(succeeded)，失败 \(failed)。", level: failed == 0 ? .success : .warning, category: .batch)
             notice = UserNotice(
                 title: "后台并行测试完成",
                 message: "成功 \(succeeded) 个，失败 \(failed) 个，共处理 \(total) 个预设。"
@@ -476,7 +520,10 @@ final class SurveyWebController: ObservableObject {
     private func stopQueue(message: String, showNotice: Bool) {
         clearQueueSession()
         queueState = .stopped(message)
-        appendLog(message, level: .warning)
+        queueSnapshot.active = 0
+        queueSnapshot.detail = message
+        let category: AutomationLogCategory = message.contains("验证") ? .security : .batch
+        appendLog(message, level: .warning, category: category)
         if showNotice {
             notice = UserNotice(title: "后台并行测试已停止", message: message)
         }
@@ -506,8 +553,90 @@ final class SurveyWebController: ObservableObject {
         backgroundTaskID = .invalid
     }
 
-    private func appendLog(_ message: String, level: AutomationLogLevel = .info) {
-        logs.append(AutomationLogEntry(timestamp: Date(), level: level, message: message))
+    private func scheduleAutoSubmit(showScheduledNotice: Bool) {
+        cancelPendingAutoSubmit()
+        isWaitingToSubmit = true
+        appendLog("填写已完成，等待 2 秒后提交。", category: .submit)
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingAutoSubmitWorkItem = nil
+            self.isWaitingToSubmit = false
+            guard !self.isQueueRunning else { return }
+            self.submitOnce(showScheduledNotice: showScheduledNotice, source: "自动提交")
+        }
+        pendingAutoSubmitWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+    }
+
+    private func inspectSingleSubmitResult(source: String, attempt: Int) {
+        guard isSubmitting else { return }
+        guard let webView else {
+            isSubmitting = false
+            appendLog("\(source)结果检查失败：问卷页面已关闭。", level: .error, category: .submit)
+            return
+        }
+
+        if webView.isLoading {
+            guard attempt < 4 else {
+                isSubmitting = false
+                appendLog("\(source)结果检查超时：页面持续加载。", level: .warning, category: .submit)
+                notice = UserNotice(title: "结果检查超时", message: "页面仍在加载，请查看当前问卷页面和运行日志。")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.inspectSingleSubmitResult(source: source, attempt: attempt + 1)
+            }
+            return
+        }
+
+        scanPage { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready(_):
+                self.appendLog("\(source)未完成：页面仍停留在问卷，可能存在必填项或格式错误。", level: .warning, category: .submit)
+                self.notice = UserNotice(
+                    title: "提交未完成",
+                    message: "页面仍停留在问卷，请检查必填项和格式提示。"
+                )
+            case .captchaRequired:
+                self.notice = UserNotice(
+                    title: "需要人机验证",
+                    message: "请先在问卷页面中手动完成验证。"
+                )
+            case .failed(let message):
+                self.notice = UserNotice(title: "提交结果检查失败", message: message)
+            default:
+                break
+            }
+        }
+    }
+
+    private func cancelPendingAutoSubmit() {
+        pendingAutoSubmitWorkItem?.cancel()
+        pendingAutoSubmitWorkItem = nil
+        isWaitingToSubmit = false
+    }
+
+    private func resetQueueSummary() {
+        guard !isQueueRunning else { return }
+        queueState = .idle
+        queueSnapshot = ParallelRunSnapshot()
+    }
+
+    private func appendLog(
+        _ message: String,
+        level: AutomationLogLevel = .info,
+        category: AutomationLogCategory = .system
+    ) {
+        logs.append(
+            AutomationLogEntry(
+                timestamp: Date(),
+                level: level,
+                category: category,
+                message: message
+            )
+        )
         if logs.count > 200 {
             logs.removeFirst(logs.count - 200)
         }
@@ -518,15 +647,15 @@ final class SurveyWebController: ObservableObject {
         case .loading:
             break
         case .ready(let questionCount):
-            appendLog("页面已就绪，检测到 \(questionCount) 道题。")
+            appendLog("页面已就绪，检测到 \(questionCount) 道题。", category: .page)
         case .submitted(let message):
-            appendLog("提交成功：\(message)", level: .success)
+            appendLog("提交成功：\(message)", level: .success, category: .submit)
         case .closed(let message):
-            appendLog("问卷不可填写：\(message)", level: .warning)
+            appendLog("问卷不可填写：\(message)", level: .warning, category: .page)
         case .captchaRequired:
-            appendLog("页面要求人机验证。", level: .warning)
+            appendLog("页面要求人机验证。", level: .warning, category: .security)
         case .failed(let message):
-            appendLog("页面处理失败：\(message)", level: .error)
+            appendLog("页面处理失败：\(message)", level: .error, category: .page)
         }
     }
 

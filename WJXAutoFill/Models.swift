@@ -29,6 +29,14 @@ struct SubmissionPreset: Identifiable, Codable, Hashable {
         }
     }
 
+    var completedFieldCount: Int {
+        Self.requiredQuestions.filter { !answer(for: $0).isEmpty }.count
+    }
+
+    var missingQuestions: [String] {
+        Self.requiredQuestions.filter { answer(for: $0).isEmpty }
+    }
+
     func answer(for keyword: String) -> String {
         guard let rule = rules.first(where: { $0.questionContains.contains(keyword) }) else {
             return ""
@@ -65,18 +73,67 @@ struct UserNotice: Identifiable {
     let message: String
 }
 
-enum AutomationLogLevel {
+enum AutomationLogLevel: String, CaseIterable, Identifiable {
     case info
     case success
     case warning
     case error
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .info: return "信息"
+        case .success: return "成功"
+        case .warning: return "警告"
+        case .error: return "失败"
+        }
+    }
+}
+
+enum AutomationLogCategory: String, CaseIterable, Identifiable {
+    case system = "系统"
+    case page = "页面"
+    case fill = "填写"
+    case submit = "提交"
+    case batch = "批量"
+    case security = "验证"
+
+    var id: String { rawValue }
 }
 
 struct AutomationLogEntry: Identifiable {
     let id = UUID()
     let timestamp: Date
     let level: AutomationLogLevel
+    let category: AutomationLogCategory
     let message: String
+
+    var title: String {
+        guard let separator = message.firstIndex(of: "：") else { return message }
+        return String(message[..<separator])
+    }
+
+    var detail: String? {
+        guard let separator = message.firstIndex(of: "：") else { return nil }
+        let value = String(message[message.index(after: separator)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
+struct ParallelRunSnapshot: Equatable {
+    var completed = 0
+    var total = 0
+    var succeeded = 0
+    var failed = 0
+    var active = 0
+    var detail = "尚未启动"
+
+    var progress: Double {
+        guard total > 0 else { return 0 }
+        return min(max(Double(completed) / Double(total), 0), 1)
+    }
 }
 
 final class RuleStore: ObservableObject {
@@ -207,6 +264,22 @@ final class RuleStore: ObservableObject {
         parallelValidationMessage == nil
     }
 
+    func validationMessage(for preset: SubmissionPreset) -> String? {
+        if !preset.missingQuestions.isEmpty {
+            return "缺少" + preset.missingQuestions.joined(separator: "、")
+        }
+
+        let duplicateQuestions = SubmissionPreset.requiredQuestions.filter { keyword in
+            let value = preset.answer(for: keyword).lowercased()
+            guard !value.isEmpty else { return false }
+            return presets.filter { $0.answer(for: keyword).lowercased() == value }.count > 1
+        }
+        if !duplicateQuestions.isEmpty {
+            return duplicateQuestions.joined(separator: "、") + "重复"
+        }
+        return nil
+    }
+
     func fixedAnswer(for keyword: String, presetID: UUID) -> String {
         guard let presetIndex = presets.firstIndex(where: { $0.id == presetID }),
               let ruleIndex = fixedRuleIndex(keyword: keyword, presetIndex: presetIndex) else {
@@ -220,6 +293,15 @@ final class RuleStore: ObservableObject {
         let ruleIndex = ensureFixedRule(keyword: keyword, presetIndex: presetIndex)
         presets[presetIndex].rules[ruleIndex].answer = value
         presets[presetIndex].rules[ruleIndex].isEnabled = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func clearPreset(_ presetID: UUID) {
+        guard let presetIndex = presets.firstIndex(where: { $0.id == presetID }) else { return }
+        for keyword in SubmissionPreset.requiredQuestions {
+            let ruleIndex = ensureFixedRule(keyword: keyword, presetIndex: presetIndex)
+            presets[presetIndex].rules[ruleIndex].answer = ""
+            presets[presetIndex].rules[ruleIndex].isEnabled = false
+        }
     }
 
     private func persistPresets() {
