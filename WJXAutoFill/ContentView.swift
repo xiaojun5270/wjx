@@ -108,7 +108,7 @@ struct ContentView: View {
                 } label: {
                     Image(
                         systemName: refreshScheduler.targetDate == nil
-                            ? "clock.badge.plus"
+                            ? "clock"
                             : "clock.fill"
                     )
                     .frame(width: isCompact ? 22 : 28, height: 28)
@@ -143,35 +143,54 @@ struct ContentView: View {
 
             Divider()
 
-            if refreshScheduler.targetDate != nil {
-                Button {
-                    showingScheduledRefresh = true
-                } label: {
-                    HStack(spacing: isCompact ? 4 : 7) {
-                        Image(systemName: "clock.fill")
-                            .font(.caption)
-                        Text(
-                            isCompact
-                                ? scheduledRefreshCountdown
-                                : "定时刷新  \(scheduledRefreshCountdown)"
-                        )
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .lineLimit(1)
-                        if !isCompact {
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                        }
-                    }
-                    .foregroundStyle(Color.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, isCompact ? 7 : 12)
-                    .padding(.vertical, 8)
-                }
-                .buttonStyle(.plain)
+            Button {
+                showingScheduledRefresh = true
+            } label: {
+                HStack(spacing: isCompact ? 4 : 7) {
+                    Image(
+                        systemName: refreshScheduler.targetDate == nil
+                            ? "clock"
+                            : "clock.fill"
+                    )
+                    .font(.caption)
 
-                Divider()
+                    if isCompact {
+                        Text(
+                            refreshScheduler.targetDate == nil
+                                ? "定时"
+                                : scheduledRefreshCountdown
+                        )
+                        .font(
+                            refreshScheduler.targetDate == nil
+                                ? Font.caption.weight(.semibold)
+                                : Font.caption2.monospacedDigit().weight(.semibold)
+                        )
+                    } else {
+                        Text("定时刷新")
+                            .font(.caption.weight(.semibold))
+                        Spacer(minLength: 0)
+                        Text(
+                            refreshScheduler.targetDate == nil
+                                ? "设置"
+                                : scheduledRefreshCountdown
+                        )
+                        .font(.caption.monospacedDigit())
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                    }
+                }
+                .foregroundStyle(
+                    refreshScheduler.targetDate == nil
+                        ? Color.primary
+                        : Color.orange
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, isCompact ? 7 : 12)
+                .padding(.vertical, 8)
             }
+            .buttonStyle(.plain)
+
+            Divider()
 
             List {
                 ForEach(workspace.pages) { page in
