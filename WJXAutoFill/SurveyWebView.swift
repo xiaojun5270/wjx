@@ -3,6 +3,78 @@ import SwiftUI
 import UIKit
 import WebKit
 
+private final class SurveyWebLoadGate {
+    static let shared = SurveyWebLoadGate(maximumConcurrentLoads: 2)
+
+    private struct PendingLoad {
+        let id: UUID
+        let isPriority: Bool
+        let start: () -> Bool
+    }
+
+    private let maximumConcurrentLoads: Int
+    private var activeLoadIDs: Set<UUID> = []
+    private var pendingLoads: [PendingLoad] = []
+
+    private init(maximumConcurrentLoads: Int) {
+        self.maximumConcurrentLoads = max(maximumConcurrentLoads, 1)
+    }
+
+    func enqueue(
+        id: UUID,
+        priority: Bool,
+        start: @escaping () -> Bool
+    ) {
+        pendingLoads.removeAll { $0.id == id }
+        activeLoadIDs.remove(id)
+        let load = PendingLoad(id: id, isPriority: priority, start: start)
+        if priority,
+           let firstBackgroundIndex = pendingLoads.firstIndex(where: { !$0.isPriority }) {
+            pendingLoads.insert(load, at: firstBackgroundIndex)
+        } else {
+            pendingLoads.append(load)
+        }
+        drain()
+    }
+
+    func promote(id: UUID) {
+        guard let index = pendingLoads.firstIndex(where: { $0.id == id }) else { return }
+        let load = pendingLoads.remove(at: index)
+        pendingLoads.insert(
+            PendingLoad(id: load.id, isPriority: true, start: load.start),
+            at: 0
+        )
+        drain()
+    }
+
+    func cancel(id: UUID, drainQueue: Bool = true) {
+        pendingLoads.removeAll { $0.id == id }
+        if activeLoadIDs.remove(id) != nil, drainQueue {
+            drain()
+        }
+    }
+
+    func finish(id: UUID) {
+        let removedPending = pendingLoads.contains { $0.id == id }
+        pendingLoads.removeAll { $0.id == id }
+        let removedActive = activeLoadIDs.remove(id) != nil
+        if removedPending || removedActive {
+            drain()
+        }
+    }
+
+    private func drain() {
+        while activeLoadIDs.count < maximumConcurrentLoads,
+              !pendingLoads.isEmpty {
+            let load = pendingLoads.removeFirst()
+            activeLoadIDs.insert(load.id)
+            if !load.start() {
+                activeLoadIDs.remove(load.id)
+            }
+        }
+    }
+}
+
 final class SurveyWebController: ObservableObject {
     @Published var state: SurveyPageState = .loading
     @Published var detectedQuestions: [DetectedQuestion] = []
@@ -36,6 +108,17 @@ final class SurveyWebController: ObservableObject {
     private var handledCountdownClickGeneration: Int?
     private var pendingScheduledBatchID: UUID?
     private var pendingScheduledBatchTimeoutWorkItem: DispatchWorkItem?
+    private var componentReadinessID: UUID?
+    private var pageRecoveryID: UUID?
+    private var pageRecoveryWorkItem: DispatchWorkItem?
+    private var currentSurveyURL: URL?
+    private var automaticPageRecoveryAttempts = 0
+    private var loadGateRequestID: UUID?
+    private var loadStartWatchdogWorkItem: DispatchWorkItem?
+    private var isPageSelected = false
+
+    private static let maximumAutomaticPageRecoveryAttempts = 2
+    private static let maximumComponentReadinessAttempts = 20
 
     private enum FillEvaluation {
         case success(matched: Int, filled: Int)
@@ -47,6 +130,11 @@ final class SurveyWebController: ObservableObject {
         batchScheduleWorkItem?.cancel()
         batchScheduleTimer?.invalidate()
         pendingScheduledBatchTimeoutWorkItem?.cancel()
+        pageRecoveryWorkItem?.cancel()
+        loadStartWatchdogWorkItem?.cancel()
+        if let loadGateRequestID {
+            SurveyWebLoadGate.shared.cancel(id: loadGateRequestID)
+        }
     }
 
     var isQueueRunning: Bool {
@@ -88,6 +176,9 @@ final class SurveyWebController: ObservableObject {
 
     func shutdown() {
         stopCountdownAutomation()
+        cancelComponentReadinessCheck()
+        cancelAutomaticPageRecovery()
+        cancelProgrammaticLoad(stopLoading: true)
         cancelPendingAutoSubmit()
         cancelScheduledBatch(logCancellation: false)
         clearPendingScheduledBatch()
@@ -102,15 +193,13 @@ final class SurveyWebController: ObservableObject {
 
     @discardableResult
     func reopenSurvey(_ url: URL) -> Bool {
-        guard !isBusy, let webView else { return false }
+        guard !isBusy, webView != nil else { return false }
         prepareForNewSurvey(url)
         appendLog("按已保存地址重新打开问卷：\(url.absoluteString)", category: .page)
-        guard webView.load(
-            URLRequest(
-                url: url,
-                cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
-            )
-        ) != nil else {
+        guard scheduleProgrammaticLoad(
+            url: url,
+            cachePolicy: .reloadRevalidatingCacheData
+        ) else {
             let message = "网页未接受打开问卷的请求。"
             state = .failed(message)
             appendLog(message, level: .error, category: .page)
@@ -118,6 +207,106 @@ final class SurveyWebController: ObservableObject {
             return false
         }
         return true
+    }
+
+    fileprivate func setPageSelected(_ isSelected: Bool) {
+        isPageSelected = isSelected
+        if isSelected, let loadGateRequestID {
+            SurveyWebLoadGate.shared.promote(id: loadGateRequestID)
+        }
+    }
+
+    @discardableResult
+    fileprivate func scheduleProgrammaticLoad(
+        url: URL,
+        cachePolicy: URLRequest.CachePolicy,
+        forcePriority: Bool = false
+    ) -> Bool {
+        guard let webView else { return false }
+        cancelProgrammaticLoad(stopLoading: true, drainQueue: false)
+        let requestID = UUID()
+        loadGateRequestID = requestID
+        SurveyWebLoadGate.shared.enqueue(
+            id: requestID,
+            priority: forcePriority || isPageSelected
+        ) { [weak self, weak webView] in
+            guard let self,
+                  let webView,
+                  self.loadGateRequestID == requestID,
+                  self.webView === webView else {
+                return false
+            }
+            self.startLoadStartWatchdog(requestID: requestID)
+            let navigation = webView.load(
+                URLRequest(
+                    url: url,
+                    cachePolicy: cachePolicy,
+                    timeoutInterval: 30
+                )
+            )
+            guard navigation != nil else {
+                self.cancelLoadStartWatchdog()
+                self.loadGateRequestID = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleLoadRequestRejected()
+                }
+                return false
+            }
+            return true
+        }
+        return true
+    }
+
+    fileprivate func finishProgrammaticLoad() {
+        guard let requestID = loadGateRequestID else { return }
+        cancelLoadStartWatchdog()
+        loadGateRequestID = nil
+        SurveyWebLoadGate.shared.finish(id: requestID)
+    }
+
+    fileprivate var hasProgrammaticLoadInFlight: Bool {
+        loadGateRequestID != nil
+    }
+
+    fileprivate var programmaticLoadRequestID: UUID? {
+        loadGateRequestID
+    }
+
+    fileprivate func handleProgrammaticNavigationStarted() {
+        cancelLoadStartWatchdog()
+    }
+
+    private func cancelProgrammaticLoad(
+        stopLoading: Bool,
+        drainQueue: Bool = true
+    ) {
+        guard let requestID = loadGateRequestID else { return }
+        cancelLoadStartWatchdog()
+        loadGateRequestID = nil
+        SurveyWebLoadGate.shared.cancel(id: requestID, drainQueue: drainQueue)
+        if stopLoading {
+            webView?.stopLoading()
+        }
+    }
+
+    private func startLoadStartWatchdog(requestID: UUID) {
+        cancelLoadStartWatchdog()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.loadGateRequestID == requestID else { return }
+            self.loadStartWatchdogWorkItem = nil
+            if self.attemptAutomaticPageRecovery(reason: "网页加载请求长时间未启动") {
+                return
+            }
+            self.finishComponentReadinessFailure("网页加载请求未能正常启动，请点击刷新重试。")
+        }
+        loadStartWatchdogWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: workItem)
+    }
+
+    private func cancelLoadStartWatchdog() {
+        loadStartWatchdogWorkItem?.cancel()
+        loadStartWatchdogWorkItem = nil
     }
 
     func goBack() {
@@ -310,7 +499,7 @@ final class SurveyWebController: ObservableObject {
             execute: workItem
         )
 
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             self?.updateBatchScheduleCountdown()
         }
         batchScheduleTimer = timer
@@ -420,9 +609,14 @@ final class SurveyWebController: ObservableObject {
     }
 
     fileprivate func prepareForNewSurvey(_ url: URL) {
+        cancelComponentReadinessCheck()
+        cancelAutomaticPageRecovery()
+        cancelProgrammaticLoad(stopLoading: true)
         stopCountdownAutomation()
         cancelPendingAutoSubmit()
         resetQueueSummary()
+        currentSurveyURL = url
+        automaticPageRecoveryAttempts = 0
         isFilling = false
         isSubmitting = false
         hasAutoSubmittedCurrentForm = false
@@ -433,6 +627,8 @@ final class SurveyWebController: ObservableObject {
 
     @discardableResult
     fileprivate func handleNavigationStarted(in webView: WKWebView) -> Int {
+        cancelComponentReadinessCheck()
+        cancelAutomaticPageRecovery()
         stopCountdownAutomation()
         cancelPendingAutoSubmit()
         state = .loading
@@ -470,6 +666,8 @@ final class SurveyWebController: ObservableObject {
         installCountdownAutoStart(generation: generation) { [weak self] autoStartStatus in
             guard let self, self.navigationGeneration == generation else { return }
             if autoStartStatus == "clicked" {
+                self.finishProgrammaticLoad()
+                self.automaticPageRecoveryAttempts = 0
                 self.state = .loading
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
                     guard let self,
@@ -492,21 +690,19 @@ final class SurveyWebController: ObservableObject {
                 return
             }
             if autoStartStatus == "waiting" {
+                self.finishProgrammaticLoad()
+                self.automaticPageRecoveryAttempts = 0
                 self.state = .loading
                 self.appendLog("检测到活动倒计时，等待自动点击“立即开始”。", category: .page)
                 return
             }
-            self.scanPage(expectedNavigationGeneration: generation) { [weak self] scannedState in
-                guard let self, self.navigationGeneration == generation else { return }
-                self.processScannedPage(
-                    scannedState,
-                    generation: generation,
-                    defaultRules: defaultRules,
-                    autoFillOnLoad: autoFillOnLoad,
-                    autoSubmitAfterFill: autoSubmitAfterFill,
-                    submitDelaySeconds: submitDelaySeconds
-                )
-            }
+            self.beginComponentReadinessCheck(
+                generation: generation,
+                defaultRules: defaultRules,
+                autoFillOnLoad: autoFillOnLoad,
+                autoSubmitAfterFill: autoSubmitAfterFill,
+                submitDelaySeconds: submitDelaySeconds
+            )
         }
     }
 
@@ -524,6 +720,7 @@ final class SurveyWebController: ObservableObject {
               generation == navigationGeneration,
               handledCountdownClickGeneration != generation else { return }
         handledCountdownClickGeneration = generation
+        automaticPageRecoveryAttempts = 0
         if type == "clicked" {
             let label = payload["label"] as? String ?? "立即开始"
             appendLog("倒计时结束，已自动点击“\(label)”。", level: .success, category: .page)
@@ -547,18 +744,246 @@ final class SurveyWebController: ObservableObject {
             completion("unavailable")
             return
         }
+        var hasCompleted = false
+        let finish: (String) -> Void = { status in
+            guard !hasCompleted else { return }
+            hasCompleted = true
+            completion(status)
+        }
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            guard let self, self.navigationGeneration == generation else { return }
+            finish("unavailable")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: timeoutWorkItem)
         let script = AutomationScript.installCountdownAutoStart(generation: generation)
         webView.evaluateJavaScript(script) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self, self.navigationGeneration == generation else { return }
+                timeoutWorkItem.cancel()
                 guard error == nil,
                       let payload = Self.dictionary(from: result),
                       Self.integer(from: payload["generation"]) == generation else {
-                    completion("unavailable")
+                    finish("unavailable")
                     return
                 }
-                completion(payload["status"] as? String ?? "watching")
+                finish(payload["status"] as? String ?? "watching")
             }
+        }
+    }
+
+    private func beginComponentReadinessCheck(
+        generation: Int,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        cancelComponentReadinessCheck()
+        let readinessID = UUID()
+        componentReadinessID = readinessID
+        scheduleComponentReadinessCheck(
+            readinessID: readinessID,
+            generation: generation,
+            attempt: 0,
+            defaultRules: defaultRules,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+    }
+
+    private func scheduleComponentReadinessCheck(
+        readinessID: UUID,
+        generation: Int,
+        attempt: Int,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        let delay = attempt == 0 ? 0.12 : 0.4
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self,
+                  self.componentReadinessID == readinessID,
+                  self.navigationGeneration == generation else { return }
+            guard let webView = self.webView else {
+                self.finishComponentReadinessFailure("问卷页面已关闭。")
+                return
+            }
+            if webView.isLoading {
+                self.retryComponentReadinessCheck(
+                    readinessID: readinessID,
+                    generation: generation,
+                    attempt: attempt,
+                    diagnostic: "网页仍在加载",
+                    defaultRules: defaultRules,
+                    autoFillOnLoad: autoFillOnLoad,
+                    autoSubmitAfterFill: autoSubmitAfterFill,
+                    submitDelaySeconds: submitDelaySeconds
+                )
+                return
+            }
+
+            var evaluationFinished = false
+            let evaluationTimeout = DispatchWorkItem { [weak self] in
+                guard let self,
+                      !evaluationFinished,
+                      self.componentReadinessID == readinessID,
+                      self.navigationGeneration == generation else { return }
+                evaluationFinished = true
+                self.retryComponentReadinessCheck(
+                    readinessID: readinessID,
+                    generation: generation,
+                    attempt: attempt,
+                    diagnostic: "组件检测没有响应",
+                    defaultRules: defaultRules,
+                    autoFillOnLoad: autoFillOnLoad,
+                    autoSubmitAfterFill: autoSubmitAfterFill,
+                    submitDelaySeconds: submitDelaySeconds
+                )
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: evaluationTimeout)
+            webView.evaluateJavaScript(AutomationScript.readiness) { [weak self] result, error in
+                DispatchQueue.main.async {
+                    guard let self,
+                          !evaluationFinished,
+                          self.componentReadinessID == readinessID,
+                          self.navigationGeneration == generation else { return }
+                    evaluationFinished = true
+                    evaluationTimeout.cancel()
+                    let payload = Self.dictionary(from: result)
+                    if error == nil, payload?["ready"] as? Bool == true {
+                        self.componentReadinessID = nil
+                        self.scanPage(expectedNavigationGeneration: generation) { [weak self] scannedState in
+                            guard let self, self.navigationGeneration == generation else { return }
+                            switch scannedState {
+                            case .ready(let questionCount) where questionCount > 0:
+                                self.finishProgrammaticLoad()
+                                self.automaticPageRecoveryAttempts = 0
+                            case .submitted, .closed, .captchaRequired:
+                                self.finishProgrammaticLoad()
+                                self.automaticPageRecoveryAttempts = 0
+                            case .ready:
+                                if self.attemptAutomaticPageRecovery(
+                                    reason: "页面已完成加载，但未检测到题目控件"
+                                ) {
+                                    return
+                                }
+                                self.finishComponentReadinessFailure(
+                                    "页面未检测到可填写题目，自动恢复后仍未就绪。"
+                                )
+                                return
+                            case .failed(let message):
+                                if self.attemptAutomaticPageRecovery(
+                                    reason: "页面状态检测失败：\(message)"
+                                ) {
+                                    return
+                                }
+                                self.finishComponentReadinessFailure(message)
+                                return
+                            case .loading:
+                                if self.attemptAutomaticPageRecovery(
+                                    reason: "页面状态持续停留在加载中"
+                                ) {
+                                    return
+                                }
+                                self.finishComponentReadinessFailure("页面状态持续停留在加载中。")
+                                return
+                            }
+                            self.processScannedPage(
+                                scannedState,
+                                generation: generation,
+                                defaultRules: defaultRules,
+                                autoFillOnLoad: autoFillOnLoad,
+                                autoSubmitAfterFill: autoSubmitAfterFill,
+                                submitDelaySeconds: submitDelaySeconds
+                            )
+                        }
+                        return
+                    }
+
+                    let diagnostic = self.componentReadinessDiagnostic(
+                        payload: payload,
+                        error: error
+                    )
+                    self.retryComponentReadinessCheck(
+                        readinessID: readinessID,
+                        generation: generation,
+                        attempt: attempt,
+                        diagnostic: diagnostic,
+                        defaultRules: defaultRules,
+                        autoFillOnLoad: autoFillOnLoad,
+                        autoSubmitAfterFill: autoSubmitAfterFill,
+                        submitDelaySeconds: submitDelaySeconds
+                    )
+                }
+            }
+        }
+    }
+
+    private func retryComponentReadinessCheck(
+        readinessID: UUID,
+        generation: Int,
+        attempt: Int,
+        diagnostic: String,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        guard attempt < Self.maximumComponentReadinessAttempts else {
+            componentReadinessID = nil
+            if attemptAutomaticPageRecovery(reason: "网页组件未完整加载：\(diagnostic)") {
+                return
+            }
+            finishComponentReadinessFailure(
+                "网页核心组件未完整加载，自动恢复后仍未就绪。"
+            )
+            return
+        }
+        scheduleComponentReadinessCheck(
+            readinessID: readinessID,
+            generation: generation,
+            attempt: attempt + 1,
+            defaultRules: defaultRules,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+    }
+
+    private func componentReadinessDiagnostic(
+        payload: [String: Any]?,
+        error: Error?
+    ) -> String {
+        if let error { return error.localizedDescription }
+        guard let payload else { return "无法读取组件状态" }
+        let readyState = payload["readyState"] as? String ?? "未知"
+        let questionCount = Self.integer(from: payload["questionCount"]) ?? 0
+        let hasJQuery = payload["hasJQuery"] as? Bool == true ? "是" : "否"
+        let hasSubmit = payload["hasSubmitControl"] as? Bool == true ? "是" : "否"
+        return "文档=\(readyState)，题目控件=\(questionCount)，基础脚本=\(hasJQuery)，提交控件=\(hasSubmit)"
+    }
+
+    private func cancelComponentReadinessCheck() {
+        componentReadinessID = nil
+    }
+
+    private func finishComponentReadinessFailure(_ message: String) {
+        cancelComponentReadinessCheck()
+        cancelAutomaticPageRecovery()
+        finishProgrammaticLoad()
+        cancelPendingAutoSubmit()
+        isFilling = false
+        isSubmitting = false
+        state = .failed(message)
+        appendLog(message, level: .error, category: .page)
+        if pendingScheduledBatch != nil {
+            stopPendingScheduledBatch(message: message, title: "问卷加载失败")
+        } else if isQueueRunning {
+            stopQueue(message: message, showNotice: true)
+        } else {
+            notice = UserNotice(title: "网页加载不完整", message: "已自动重试，请检查网络后点击刷新。")
         }
     }
 
@@ -791,6 +1216,86 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
+    @discardableResult
+    private func attemptAutomaticPageRecovery(reason: String) -> Bool {
+        guard !isQueueRunning,
+              !isSubmitting,
+              !isWaitingToSubmit,
+              automaticPageRecoveryAttempts < Self.maximumAutomaticPageRecoveryAttempts,
+              let webView,
+              let url = currentSurveyURL else {
+            return false
+        }
+
+        cancelComponentReadinessCheck()
+        cancelAutomaticPageRecovery()
+        cancelPendingAutoSubmit()
+        isFilling = false
+        automaticPageRecoveryAttempts += 1
+        let attempt = automaticPageRecoveryAttempts
+        appendLog(
+            "检测到网页加载异常，正在自动恢复（\(attempt)/\(Self.maximumAutomaticPageRecoveryAttempts)）：\(reason)",
+            level: .warning,
+            category: .page
+        )
+
+        stopCountdownAutomation()
+        webView.stopLoading()
+        state = .loading
+
+        let recoveryID = UUID()
+        pageRecoveryID = recoveryID
+        let workItem = DispatchWorkItem { [weak self, weak webView] in
+            guard let self,
+                  let webView,
+                  self.pageRecoveryID == recoveryID,
+                  self.webView === webView else { return }
+            self.pageRecoveryID = nil
+            self.pageRecoveryWorkItem = nil
+            let cachePolicy: URLRequest.CachePolicy = attempt == 1
+                ? .reloadRevalidatingCacheData
+                : .reloadIgnoringLocalAndRemoteCacheData
+            guard self.scheduleProgrammaticLoad(
+                url: url,
+                cachePolicy: cachePolicy
+            ) else {
+                self.finishComponentReadinessFailure("网页未接受自动恢复请求。")
+                return
+            }
+        }
+        pageRecoveryWorkItem = workItem
+        let delay = 0.25 + Double(attempt - 1) * 0.25
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        return true
+    }
+
+    private func cancelAutomaticPageRecovery() {
+        pageRecoveryWorkItem?.cancel()
+        pageRecoveryWorkItem = nil
+        pageRecoveryID = nil
+    }
+
+    fileprivate func handleNavigationStalled(
+        navigationGeneration expectedGeneration: Int
+    ) {
+        guard navigationGeneration == expectedGeneration else { return }
+        if attemptAutomaticPageRecovery(reason: "主页面加载超过 25 秒仍未完成") {
+            return
+        }
+        finishComponentReadinessFailure("网页加载超时，请检查网络后刷新。")
+    }
+
+    fileprivate func handleWebContentProcessTerminated() {
+        if attemptAutomaticPageRecovery(reason: "网页进程因系统资源压力被终止") {
+            return
+        }
+        finishComponentReadinessFailure("网页进程已停止，无法自动恢复。")
+    }
+
+    fileprivate func handleLoadRequestRejected() {
+        finishComponentReadinessFailure("网页未接受加载请求，请点击刷新重试。")
+    }
+
     fileprivate func handleNavigationFailure(
         _ error: Error,
         navigationGeneration expectedGeneration: Int
@@ -815,6 +1320,11 @@ final class SurveyWebController: ObservableObject {
     ) {
         guard navigationGeneration == expectedGeneration else { return }
         let message = error.localizedDescription
+        if isTransientNavigationError(error as NSError),
+           attemptAutomaticPageRecovery(reason: "网络加载失败：\(message)") {
+            return
+        }
+        finishProgrammaticLoad()
         stopCountdownAutomation()
         cancelPendingAutoSubmit()
         isFilling = false
@@ -827,6 +1337,19 @@ final class SurveyWebController: ObservableObject {
         if isQueueRunning {
             stopQueue(message: "页面加载失败：\(message)", showNotice: true)
         }
+    }
+
+    private func isTransientNavigationError(_ error: NSError) -> Bool {
+        guard error.domain == NSURLErrorDomain else { return false }
+        return [
+            NSURLErrorTimedOut,
+            NSURLErrorCannotFindHost,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorNetworkConnectionLost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorNotConnectedToInternet,
+            NSURLErrorResourceUnavailable
+        ].contains(error.code)
     }
 
     fileprivate func handleParallelMessage(_ body: Any) {
@@ -1117,7 +1640,7 @@ final class SurveyWebController: ObservableObject {
             notice = UserNotice(title: "错过整点执行", message: message)
             return
         }
-        guard let webView else {
+        guard webView != nil else {
             let message = "问卷页面不可用，无法执行整点刷新。"
             queueState = .stopped(message)
             queueSnapshot.detail = message
@@ -1133,7 +1656,11 @@ final class SurveyWebController: ObservableObject {
         canGoBack = false
         state = .loading
         appendLog("到达活动整点，正在强制刷新问卷。", category: .batch)
-        guard webView.reloadFromOrigin() != nil else {
+        guard scheduleProgrammaticLoad(
+            url: scheduled.surveyURL,
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+            forcePriority: true
+        ) else {
             let message = "网页未接受刷新请求，整点任务已停止。"
             stopPendingScheduledBatch(message: message, title: "整点刷新失败")
             return
@@ -1348,6 +1875,10 @@ struct SurveyWebView: UIViewRepresentable {
     let autoFillOnLoad: Bool
     let autoSubmitAfterFill: Bool
     let submitDelaySeconds: Int
+    let isSelected: Bool
+    let initialLoadDelaySeconds: TimeInterval
+
+    private static let sharedProcessPool = WKProcessPool()
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -1357,6 +1888,7 @@ struct SurveyWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         // Keep WJX draft-recovery state from carrying across app launches.
         configuration.websiteDataStore = .nonPersistent()
+        configuration.processPool = Self.sharedProcessPool
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "parallelTest")
         configuration.userContentController.add(context.coordinator, name: "countdownAutoStart")
@@ -1366,28 +1898,33 @@ struct SurveyWebView: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.keyboardDismissMode = .interactive
-        if #available(iOS 16.4, *) {
-            webView.isInspectable = true
-        }
+#if DEBUG
+        if #available(iOS 16.4, *) { webView.isInspectable = true }
+#endif
 
         controller.webView = webView
+        controller.setPageSelected(isSelected)
         context.coordinator.loadedURL = url
         controller.prepareForNewSurvey(url)
-        webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
+        context.coordinator.scheduleSurveyLoad(in: webView, url: url)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         controller.webView = webView
+        controller.setPageSelected(isSelected)
         if context.coordinator.loadedURL != url {
             context.coordinator.loadedURL = url
             controller.prepareForNewSurvey(url)
-            webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData))
+            context.coordinator.scheduleSurveyLoad(in: webView, url: url)
+        } else if isSelected {
+            context.coordinator.startPendingSurveyLoadImmediately(in: webView)
         }
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.cancelScheduledWork()
         coordinator.parent.controller.shutdown()
         uiView.navigationDelegate = nil
         uiView.uiDelegate = nil
@@ -1400,22 +1937,125 @@ struct SurveyWebView: UIViewRepresentable {
         var loadedURL: URL?
         private var activeNavigation: WKNavigation?
         private var activeNavigationGeneration: Int?
+        private var pendingSurveyLoadWorkItem: DispatchWorkItem?
+        private var hasStartedScheduledLoad = false
+        private var navigationWatchdogWorkItem: DispatchWorkItem?
+        private var completedProgrammaticRequestID: UUID?
 
         init(parent: SurveyWebView) {
             self.parent = parent
         }
 
+        func scheduleSurveyLoad(in webView: WKWebView, url: URL) {
+            pendingSurveyLoadWorkItem?.cancel()
+            pendingSurveyLoadWorkItem = nil
+            hasStartedScheduledLoad = false
+
+            let delay = parent.isSelected ? 0 : max(parent.initialLoadDelaySeconds, 0)
+            guard delay > 0 else {
+                beginScheduledSurveyLoad(in: webView, url: url)
+                return
+            }
+
+            let workItem = DispatchWorkItem { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.beginScheduledSurveyLoad(in: webView, url: url)
+            }
+            pendingSurveyLoadWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
+
+        func startPendingSurveyLoadImmediately(in webView: WKWebView) {
+            guard !hasStartedScheduledLoad,
+                  pendingSurveyLoadWorkItem != nil,
+                  let loadedURL else { return }
+            pendingSurveyLoadWorkItem?.cancel()
+            pendingSurveyLoadWorkItem = nil
+            beginScheduledSurveyLoad(in: webView, url: loadedURL)
+        }
+
+        func cancelScheduledWork() {
+            pendingSurveyLoadWorkItem?.cancel()
+            pendingSurveyLoadWorkItem = nil
+            navigationWatchdogWorkItem?.cancel()
+            navigationWatchdogWorkItem = nil
+            completedProgrammaticRequestID = nil
+        }
+
+        private func beginScheduledSurveyLoad(in webView: WKWebView, url: URL) {
+            guard !hasStartedScheduledLoad,
+                  loadedURL == url,
+                  parent.controller.webView === webView else { return }
+            hasStartedScheduledLoad = true
+            pendingSurveyLoadWorkItem = nil
+            guard parent.controller.scheduleProgrammaticLoad(
+                url: url,
+                cachePolicy: .useProtocolCachePolicy
+            ) else {
+                parent.controller.handleLoadRequestRejected()
+                return
+            }
+        }
+
+        private func startNavigationWatchdog(
+            for navigation: WKNavigation,
+            generation: Int,
+            in webView: WKWebView
+        ) {
+            navigationWatchdogWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self, weak webView] in
+                guard let self,
+                      let webView,
+                      self.activeNavigation === navigation,
+                      self.activeNavigationGeneration == generation,
+                      webView.isLoading else { return }
+                self.navigationWatchdogWorkItem = nil
+                self.parent.controller.handleNavigationStalled(
+                    navigationGeneration: generation
+                )
+            }
+            navigationWatchdogWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: workItem)
+        }
+
+        private func cancelNavigationWatchdog() {
+            navigationWatchdogWorkItem?.cancel()
+            navigationWatchdogWorkItem = nil
+        }
+
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            parent.controller.handleProgrammaticNavigationStarted()
+            if let completedProgrammaticRequestID,
+               parent.controller.programmaticLoadRequestID == completedProgrammaticRequestID {
+                parent.controller.finishProgrammaticLoad()
+            }
+            completedProgrammaticRequestID = nil
+            if pendingSurveyLoadWorkItem != nil, webView.url == loadedURL {
+                pendingSurveyLoadWorkItem?.cancel()
+                pendingSurveyLoadWorkItem = nil
+                hasStartedScheduledLoad = true
+            }
             activeNavigation = navigation
             activeNavigationGeneration = parent.controller.handleNavigationStarted(in: webView)
+            if parent.controller.hasProgrammaticLoadInFlight,
+               let navigation,
+               let generation = activeNavigationGeneration {
+                startNavigationWatchdog(
+                    for: navigation,
+                    generation: generation,
+                    in: webView
+                )
+            }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             guard let navigation = navigation,
                   activeNavigation === navigation,
                   let generation = activeNavigationGeneration else { return }
+            cancelNavigationWatchdog()
             activeNavigation = nil
             activeNavigationGeneration = nil
+            completedProgrammaticRequestID = parent.controller.programmaticLoadRequestID
             parent.controller.handlePageLoaded(
                 navigationGeneration: generation,
                 defaultRules: parent.rules,
@@ -1429,8 +2069,10 @@ struct SurveyWebView: UIViewRepresentable {
             guard let navigation = navigation,
                   activeNavigation === navigation,
                   let generation = activeNavigationGeneration else { return }
+            cancelNavigationWatchdog()
             activeNavigation = nil
             activeNavigationGeneration = nil
+            completedProgrammaticRequestID = nil
             parent.controller.updateNavigationState(from: webView)
             parent.controller.handleNavigationFailure(
                 error,
@@ -1442,13 +2084,23 @@ struct SurveyWebView: UIViewRepresentable {
             guard let navigation = navigation,
                   activeNavigation === navigation,
                   let generation = activeNavigationGeneration else { return }
+            cancelNavigationWatchdog()
             activeNavigation = nil
             activeNavigationGeneration = nil
+            completedProgrammaticRequestID = nil
             parent.controller.updateNavigationState(from: webView)
             parent.controller.handleNavigationFailure(
                 error,
                 navigationGeneration: generation
             )
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            cancelNavigationWatchdog()
+            activeNavigation = nil
+            activeNavigationGeneration = nil
+            completedProgrammaticRequestID = nil
+            parent.controller.handleWebContentProcessTerminated()
         }
 
         func webView(

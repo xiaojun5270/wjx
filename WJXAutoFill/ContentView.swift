@@ -118,10 +118,10 @@ struct ContentView: View {
                     )
                     .listRowInsets(
                         EdgeInsets(
-                            top: 2,
-                            leading: isCompact ? 5 : 7,
-                            bottom: 2,
-                            trailing: isCompact ? 5 : 7
+                            top: 4,
+                            leading: isCompact ? 6 : 9,
+                            bottom: 4,
+                            trailing: isCompact ? 6 : 9
                         )
                     )
                     .listRowSeparator(.hidden)
@@ -139,7 +139,7 @@ struct ContentView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, isCompact ? 46 : 50)
+            .environment(\.defaultMinListRowHeight, isCompact ? 54 : 58)
 
             Divider()
             HStack {
@@ -180,16 +180,18 @@ struct ContentView: View {
             return
         }
 
-        let reopenedCount = reloadablePages.reduce(into: 0) { count, page in
-            guard let url = page.surveyURL,
-                  page.controller.reopenSurvey(url) else { return }
-            count += 1
+        for (index, page) in reloadablePages.enumerated() {
+            guard let url = page.surveyURL else { continue }
+            let delay = Double(index) * 0.05
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                _ = page.controller.reopenSurvey(url)
+            }
         }
 
-        if reopenedCount != workspace.pages.count {
+        if reloadablePages.count != workspace.pages.count {
             workspaceNotice = UserNotice(
                 title: "部分页面已刷新",
-                message: "已刷新 \(reopenedCount) 个页面；尚未加载或地址无效的页面已跳过。"
+                message: "已安排刷新 \(reloadablePages.count) 个页面；尚未加载或地址无效的页面已跳过。"
             )
         }
     }
@@ -223,29 +225,71 @@ private struct SurveyPageSidebarRow: View {
     }
 
     var body: some View {
-        HStack(spacing: isCompact ? 4 : 9) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 7, height: 7)
+        HStack(spacing: isCompact ? 7 : 10) {
+            ZStack {
+                Circle()
+                    .fill(statusColor.opacity(0.18))
+                    .frame(width: isCompact ? 15 : 17, height: isCompact ? 15 : 17)
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: isCompact ? 7 : 8, height: isCompact ? 7 : 8)
+            }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(isCompact ? "页 \(page.pageNumber)" : page.title)
-                    .font((isCompact ? Font.caption : Font.subheadline).weight(isSelected ? .semibold : .regular))
+                    .font((isCompact ? Font.caption : Font.subheadline).weight(.semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
                     .lineLimit(1)
                 Text(isCompact ? presetName : "\(presetName) · \(page.surveyURL?.host ?? "地址未设置")")
                     .font(isCompact ? .caption2 : .caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.accentColor.opacity(0.72) : Color.secondary)
                     .lineLimit(1)
             }
 
             Spacer(minLength: isCompact ? 1 : 4)
+
+            if isSelected {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color.accentColor)
+            }
         }
-        .padding(.horizontal, isCompact ? 4 : 9)
-        .frame(minHeight: isCompact ? 46 : 50)
-        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .padding(.horizontal, isCompact ? 8 : 11)
+        .padding(.vertical, isCompact ? 7 : 8)
+        .frame(minHeight: isCompact ? 54 : 58)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    isSelected
+                        ? Color.accentColor.opacity(0.15)
+                        : Color(uiColor: .secondarySystemGroupedBackground)
+                )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(
+                    isSelected
+                        ? Color.accentColor.opacity(0.52)
+                        : Color.primary.opacity(0.07),
+                    lineWidth: isSelected ? 1.2 : 0.6
+                )
+        }
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(Color.accentColor)
+                .frame(width: 3, height: isCompact ? 30 : 34)
+                .padding(.leading, 2)
+                .opacity(isSelected ? 1 : 0)
+        }
+        .shadow(
+            color: isSelected ? Color.accentColor.opacity(0.14) : Color.clear,
+            radius: 4,
+            x: 0,
+            y: 2
+        )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
+        .animation(.easeInOut(duration: 0.18), value: isSelected)
     }
 
     private var statusColor: Color {
@@ -312,7 +356,11 @@ private struct SurveyPageView: View {
                             rules: selectedPreset?.rules ?? [],
                             autoFillOnLoad: session.autoFillOnLoad,
                             autoSubmitAfterFill: session.autoSubmitAfterFill,
-                            submitDelaySeconds: session.submitDelaySeconds
+                            submitDelaySeconds: session.submitDelaySeconds,
+                            isSelected: isSelected,
+                            initialLoadDelaySeconds: isSelected
+                                ? 0
+                                : min(Double(max(session.pageNumber - 1, 0)) * 0.06, 0.6)
                         )
                     }
                 } else {

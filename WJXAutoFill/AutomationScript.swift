@@ -77,6 +77,54 @@ enum AutomationScript {
     })()
     """#
 
+    static let readiness = #"""
+    (() => {
+      const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+      const questionControls = document.querySelectorAll(
+        '[topic] input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+        '[topic] textarea, [topic] select, [topic] [contenteditable="true"], ' +
+        'div.field input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+        'div.field textarea, div.field select, div.field [contenteditable="true"], ' +
+        'fieldset input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+        'fieldset textarea, fieldset select, fieldset [contenteditable="true"]'
+      );
+      const submitControl = document.querySelector(
+        '#ctlNext, #submit_button, #lxNextBtn, #ytyyNextBtn, #divNext, ' +
+        'button[type="submit"], input[type="submit"]'
+      );
+      const readyState = document.readyState || 'loading';
+      const hasQuestions = questionControls.length > 0;
+      const hasJQuery = typeof window.jQuery === 'function';
+      const pageText = clean(document.body?.innerText);
+      const path = (window.location.pathname || '').toLocaleLowerCase();
+      const terminalSignals = [
+        '答卷已经提交', '提交成功！', '提交完成！', '感谢您的参与！',
+        '不能再接受新的答卷', '已达到发布者设置的最大填写份数',
+        '问卷已经结束', '问卷已停止', '该问卷不存在',
+        '请完成安全验证', '点击开始智能验证', '请先完成验证'
+      ];
+      const isTerminal = path.includes('/join/complete') ||
+        terminalSignals.some(value => pageText.includes(value));
+      const countdownText = /将于.{0,40}开放|距(?:离)?.{0,12}开始|活动(?:尚未|未)开始|问卷(?:尚未|未)开始|倒计时/;
+      const seconds = Number(window.leftSeconds);
+      const hasCountdown = countdownText.test(pageText) ||
+        (Number.isFinite(seconds) && seconds > 0) ||
+        !!document.querySelector('#countdownHtml');
+      const coreReady = isTerminal || hasCountdown ||
+        (hasQuestions && hasJQuery && !!submitControl);
+      return JSON.stringify({
+        ready: readyState === 'complete' && coreReady,
+        readyState,
+        hasQuestions,
+        questionCount: questionControls.length,
+        hasJQuery,
+        hasSubmitControl: !!submitControl,
+        isTerminal,
+        hasCountdown
+      });
+    })()
+    """#
+
     static func installCountdownAutoStart(generation: Int) -> String {
         #"""
         (() => {
@@ -225,6 +273,7 @@ enum AutomationScript {
             disposed: false,
             observer: null,
             timer: null,
+            debounceTimer: null,
             unknownDeadline: Date.now() + 15000,
             inspect: null,
             dispose: null
@@ -237,6 +286,10 @@ enum AutomationScript {
               if (state.timer !== null) {
                 window.clearInterval(state.timer);
                 state.timer = null;
+              }
+              if (state.debounceTimer !== null) {
+                window.clearTimeout(state.debounceTimer);
+                state.debounceTimer = null;
               }
             }
             if (window[storageKey] === state) delete window[storageKey];
@@ -309,7 +362,14 @@ enum AutomationScript {
           state.dispose = dispose;
           state.inspect = inspect;
           window[storageKey] = state;
-          state.observer = new MutationObserver(inspect);
+          const scheduleInspect = () => {
+            if (state.disposed || state.debounceTimer !== null) return;
+            state.debounceTimer = window.setTimeout(() => {
+              state.debounceTimer = null;
+              inspect();
+            }, 120);
+          };
+          state.observer = new MutationObserver(scheduleInspect);
           state.observer.observe(document.documentElement, {
             subtree: true,
             childList: true,
@@ -317,7 +377,7 @@ enum AutomationScript {
             attributes: true,
             attributeFilter: ['class', 'style', 'disabled', 'aria-disabled', 'value']
           });
-          state.timer = window.setInterval(inspect, 250);
+          state.timer = window.setInterval(inspect, 1000);
 
           return JSON.stringify({ status: inspect(), generation });
         })()
