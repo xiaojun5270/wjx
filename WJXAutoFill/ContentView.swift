@@ -63,7 +63,7 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showingRules) {
-                RuleEditorView(store: store, detectedQuestions: webController.detectedQuestions)
+                RuleEditorView(store: store)
             }
             .confirmationDialog("确认操作", isPresented: $showingConfirmation, titleVisibility: .visible) {
                 switch confirmationAction {
@@ -72,12 +72,12 @@ struct ContentView: View {
                         webController.submitOnce()
                     }
                 case .testQueue:
-                    Button("开始 \(store.queuePresets.count) 个预设的测试", role: .destructive) {
+                    Button("启动 10 组预设的后台并行提交", role: .destructive) {
                         guard let url = store.surveyURL else { return }
-                        webController.startTestQueue(
+                        webController.startParallelTest(
                             presets: store.queuePresets,
                             surveyURL: url,
-                            delay: store.queueDelaySeconds
+                            concurrency: store.parallelConcurrency
                         )
                     }
                 }
@@ -87,7 +87,7 @@ struct ContentView: View {
                 case .singleSubmit:
                     Text("请先核对页面中的所有答案。此操作只触发一次提交。")
                 case .testQueue:
-                    Text("应用会按预设顺序自动填写和提交，每次成功后等待 \(Int(store.queueDelaySeconds)) 秒再继续。请仅用于你获授权的测试问卷。")
+                    Text("应用会在隐藏页面中同时启动 10 个填写和提交任务。请仅用于你获授权的测试问卷。")
                 }
             }
             .alert(item: $webController.notice) { notice in
@@ -153,7 +153,7 @@ struct ContentView: View {
                     confirmationAction = .testQueue
                     showingConfirmation = true
                 } label: {
-                    Label("按顺序连续测试 \(store.queuePresets.count) 个预设", systemImage: "person.2.fill")
+                    Label("同时提交 10 组预设（已填 \(store.queuePresets.count)/10）", systemImage: "person.2.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -168,11 +168,11 @@ struct ContentView: View {
     private var statusText: String {
         switch webController.queueState {
         case .running(let current, let total, let presetName):
-            return "连续测试 \(current)/\(total)：\(presetName)"
+            return "后台并行 \(current)/\(total)：\(presetName)"
         case .completed(let total):
-            return "连续测试完成：已提交 \(total) 个预设"
+            return "后台并行测试完成：成功 \(total) 个预设"
         case .stopped(let message):
-            return "连续测试已停止：\(message)"
+            return "后台并行测试已停止：\(message)"
         case .idle:
             break
         }
@@ -227,7 +227,7 @@ struct ContentView: View {
     }
 
     private var canStartQueue: Bool {
-        guard store.queuePresets.count >= 2, store.surveyURL != nil else { return false }
+        guard store.isParallelReady, store.surveyURL != nil else { return false }
         switch webController.state {
         case .ready(_), .submitted(_):
             return true
@@ -240,7 +240,7 @@ struct ContentView: View {
         if case .running(let current, let total, let presetName) = webController.queueState {
             return "\(current)/\(total) · \(presetName)"
         }
-        return "连续测试运行中"
+        return "后台并行测试运行中"
     }
 }
 

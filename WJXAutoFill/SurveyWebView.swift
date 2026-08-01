@@ -11,17 +11,9 @@ final class SurveyWebController: ObservableObject {
 
     fileprivate weak var webView: WKWebView?
     private var queuedPresets: [SubmissionPreset] = []
-    private var queueIndex = 0
-    private var queueSurveyURL: URL?
-    private var queueDelay: TimeInterval = 2
     private var queueSessionID: UUID?
-    private var queuePhase: QueuePhase?
-
-    private enum QueuePhase {
-        case loadingForm
-        case submitting
-        case waitingForNext
-    }
+    private var parallelRunID: String?
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     private enum FillEvaluation {
         case success(matched: Int, filled: Int)
@@ -72,33 +64,72 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
-    func startTestQueue(presets: [SubmissionPreset], surveyURL: URL, delay: TimeInterval) {
+    func startParallelTest(
+        presets: [SubmissionPreset],
+        surveyURL: URL,
+        concurrency: Int
+    ) {
         guard !isQueueRunning else { return }
         guard let webView else {
             notice = UserNotice(title: "无法启动测试", message: "问卷页面尚未加载。")
             return
         }
 
-        let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(20))
-        guard usablePresets.count >= 2 else {
-            notice = UserNotice(title: "预设不足", message: "连续测试至少需要两个含有效填写规则的预设。")
+        let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(RuleStore.presetCount))
+        guard usablePresets.count == RuleStore.presetCount else {
+            notice = UserNotice(title: "预设未填写完整", message: "请先完整填写 10 组不同的姓名、工号和固定邮箱。")
+            return
+        }
+
+        for keyword in SubmissionPreset.requiredQuestions {
+            let values = usablePresets.map { $0.answer(for: keyword).lowercased() }
+            guard Set(values).count == RuleStore.presetCount else {
+                notice = UserNotice(title: "预设内容重复", message: "10 组预设的\(keyword)必须各不相同。")
+                return
+            }
+        }
+
+        let sessionID = UUID()
+        let runID = sessionID.uuidString
+        guard let script = AutomationScript.parallelFill(
+            presets: usablePresets,
+            surveyURL: surveyURL,
+            concurrency: concurrency,
+            runID: runID
+        ) else {
+            notice = UserNotice(title: "无法启动测试", message: "生成后台任务失败。")
             return
         }
 
         queuedPresets = usablePresets
-        queueIndex = 0
-        queueSurveyURL = surveyURL
-        queueDelay = max(2, min(delay, 30))
-        queueSessionID = UUID()
-        queuePhase = .loadingForm
-        queueState = .running(current: 1, total: usablePresets.count, presetName: usablePresets[0].name)
-        state = .loading
-        webView.load(URLRequest(url: surveyURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
+        queueSessionID = sessionID
+        parallelRunID = runID
+        queueState = .running(current: 0, total: usablePresets.count, presetName: "正在启动后台任务")
+        beginBackgroundExecution()
+
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self, self.parallelRunID == runID else { return }
+                if let error {
+                    self.stopQueue(message: "启动后台任务失败：\(error.localizedDescription)", showNotice: true)
+                    return
+                }
+                guard let payload = Self.dictionary(from: result),
+                      payload["status"] as? String == "started" else {
+                    self.stopQueue(message: "后台任务没有成功启动。", showNotice: true)
+                    return
+                }
+            }
+        }
     }
 
     func stopTestQueue() {
         guard isQueueRunning else { return }
-        stopQueue(message: "测试队列已由用户停止。", showNotice: true)
+        if let runID = parallelRunID,
+           let script = AutomationScript.cancelParallel(runID: runID) {
+            webView?.evaluateJavaScript(script)
+        }
+        stopQueue(message: "后台并行测试已由用户停止。", showNotice: true)
     }
 
     func submitOnce() {
@@ -153,9 +184,7 @@ final class SurveyWebController: ObservableObject {
     fileprivate func handlePageLoaded(defaultRules: [FillRule], autoFillOnLoad: Bool) {
         scanPage { [weak self] scannedState in
             guard let self else { return }
-            if self.isQueueRunning {
-                self.handleQueuePage(state: scannedState)
-            } else if autoFillOnLoad, case .ready(_) = scannedState {
+            if !self.isQueueRunning, autoFillOnLoad, case .ready(_) = scannedState {
                 self.fill(rules: defaultRules, silent: true)
             }
         }
@@ -166,6 +195,47 @@ final class SurveyWebController: ObservableObject {
         state = .failed(message)
         if isQueueRunning {
             stopQueue(message: "页面加载失败：\(message)", showNotice: true)
+        }
+    }
+
+    fileprivate func handleParallelMessage(_ body: Any) {
+        guard let payload = body as? [String: Any],
+              let runID = payload["runID"] as? String,
+              runID == parallelRunID,
+              let type = payload["type"] as? String else {
+            return
+        }
+
+        let completed = payload["completed"] as? Int ?? 0
+        let succeeded = payload["succeeded"] as? Int ?? 0
+        let failed = payload["failed"] as? Int ?? 0
+        let active = payload["active"] as? Int ?? 0
+        let total = payload["total"] as? Int ?? queuedPresets.count
+
+        switch type {
+        case "started", "progress":
+            let detail = active > 0 ? "并行运行 \(active) 个任务" : "正在调度任务"
+            queueState = .running(current: completed, total: total, presetName: detail)
+
+        case "complete":
+            clearQueueSession()
+            queueState = .completed(total: succeeded)
+            notice = UserNotice(
+                title: "后台并行测试完成",
+                message: "成功 \(succeeded) 个，失败 \(failed) 个，共处理 \(total) 个预设。"
+            )
+
+        case "fatal":
+            stopQueue(
+                message: payload["message"] as? String ?? "后台并行测试已停止。",
+                showNotice: true
+            )
+
+        case "stopped":
+            stopQueue(message: "后台并行测试已停止。", showNotice: false)
+
+        default:
+            break
         }
     }
 
@@ -248,163 +318,36 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
-    private func handleQueuePage(state: SurveyPageState) {
-        guard isQueueRunning, let phase = queuePhase else { return }
-
-        switch phase {
-        case .loadingForm:
-            guard case .ready(let questionCount) = state, questionCount > 0 else {
-                stopQueueForPageState(state, fallback: "没有检测到可填写题目。")
-                return
-            }
-            let preset = queuedPresets[queueIndex]
-            evaluateFill(rules: preset.usableRules) { [weak self] evaluation in
-                guard let self, self.isQueueRunning else { return }
-                switch evaluation {
-                case .success(let matched, let filled):
-                    guard matched > 0, filled > 0 else {
-                        self.stopQueue(message: "预设“\(preset.name)”没有匹配到可填写控件。", showNotice: true)
-                        return
-                    }
-                    let sessionID = self.queueSessionID
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                        guard self.queueSessionID == sessionID else { return }
-                        self.submitCurrentQueuePreset()
-                    }
-                case .closed(let message):
-                    self.stopQueue(message: message, showNotice: true)
-                case .failed(let message):
-                    self.stopQueue(message: "预设“\(preset.name)”填写失败：\(message)", showNotice: true)
-                }
-            }
-
-        case .submitting:
-            switch state {
-            case .submitted(_):
-                advanceQueue()
-            case .captchaRequired:
-                stopQueue(message: "页面要求人机验证，测试队列已停止。", showNotice: true)
-            case .closed(let message), .failed(let message):
-                stopQueue(message: message, showNotice: true)
-            case .ready(_):
-                stopQueue(message: "提交后仍停留在问卷页面，可能有必填项或格式校验未通过。", showNotice: true)
-            case .loading:
-                break
-            }
-
-        case .waitingForNext:
-            break
-        }
-    }
-
-    private func submitCurrentQueuePreset() {
-        guard isQueueRunning, let webView else { return }
-        isSubmitting = true
-        webView.evaluateJavaScript(AutomationScript.submit) { [weak self] result, error in
-            DispatchQueue.main.async {
-                guard let self, self.isQueueRunning else { return }
-                if let error {
-                    self.isSubmitting = false
-                    self.stopQueue(message: "提交失败：\(error.localizedDescription)", showNotice: true)
-                    return
-                }
-                guard let payload = Self.dictionary(from: result),
-                      let status = payload["status"] as? String else {
-                    self.isSubmitting = false
-                    self.stopQueue(message: "页面没有返回有效提交状态。", showNotice: true)
-                    return
-                }
-                switch status {
-                case "scheduled":
-                    self.queuePhase = .submitting
-                    let sessionID = self.queueSessionID
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        guard self.queueSessionID == sessionID,
-                              self.webView?.isLoading == false else { return }
-                        self.scanPage { [weak self] scannedState in
-                            self?.handleQueuePage(state: scannedState)
-                        }
-                    }
-                case "captcha":
-                    self.isSubmitting = false
-                    self.stopQueue(message: "页面要求人机验证，测试队列已停止。", showNotice: true)
-                case "closed":
-                    self.isSubmitting = false
-                    self.stopQueue(
-                        message: payload["message"] as? String ?? "问卷当前不可提交。",
-                        showNotice: true
-                    )
-                default:
-                    self.isSubmitting = false
-                    self.stopQueue(
-                        message: payload["message"] as? String ?? "当前页面没有可用提交按钮。",
-                        showNotice: true
-                    )
-                }
-            }
-        }
-    }
-
-    private func advanceQueue() {
-        guard isQueueRunning else { return }
-        let nextIndex = queueIndex + 1
-        guard nextIndex < queuedPresets.count else {
-            let total = queuedPresets.count
-            clearQueueSession()
-            queueState = .completed(total: total)
-            notice = UserNotice(title: "连续测试完成", message: "已按顺序完成 \(total) 个预设。")
-            return
-        }
-
-        queueIndex = nextIndex
-        queuePhase = .waitingForNext
-        let nextPreset = queuedPresets[nextIndex]
-        queueState = .running(
-            current: nextIndex + 1,
-            total: queuedPresets.count,
-            presetName: nextPreset.name
-        )
-
-        let sessionID = queueSessionID
-        DispatchQueue.main.asyncAfter(deadline: .now() + queueDelay) { [weak self] in
-            guard let self,
-                  self.queueSessionID == sessionID,
-                  let url = self.queueSurveyURL,
-                  let webView = self.webView else { return }
-            self.queuePhase = .loadingForm
-            self.state = .loading
-            webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
-        }
-    }
-
-    private func stopQueueForPageState(_ state: SurveyPageState, fallback: String) {
-        switch state {
-        case .closed(let message), .failed(let message):
-            stopQueue(message: message, showNotice: true)
-        case .captchaRequired:
-            stopQueue(message: "页面要求人机验证，测试队列已停止。", showNotice: true)
-        case .submitted(_):
-            stopQueue(message: "加载测试表单时进入了提交完成页。", showNotice: true)
-        default:
-            stopQueue(message: fallback, showNotice: true)
-        }
-    }
-
     private func stopQueue(message: String, showNotice: Bool) {
         clearQueueSession()
         queueState = .stopped(message)
         if showNotice {
-            notice = UserNotice(title: "连续测试已停止", message: message)
+            notice = UserNotice(title: "后台并行测试已停止", message: message)
         }
     }
 
     private func clearQueueSession() {
         queueSessionID = nil
-        queuePhase = nil
         queuedPresets = []
-        queueIndex = 0
-        queueSurveyURL = nil
+        parallelRunID = nil
         isSubmitting = false
+        endBackgroundExecution()
+    }
+
+    private func beginBackgroundExecution() {
+        guard backgroundTaskID == .invalid else { return }
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WJXParallelTest") { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.isQueueRunning else { return }
+                self.stopQueue(message: "iOS 后台执行时间已到，测试任务已停止。", showNotice: true)
+            }
+        }
+    }
+
+    private func endBackgroundExecution() {
+        guard backgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTaskID)
+        backgroundTaskID = .invalid
     }
 
     private static func dictionary(from result: Any?) -> [String: Any]? {
@@ -432,6 +375,7 @@ struct SurveyWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.userContentController.add(context.coordinator, name: "parallelTest")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -457,7 +401,11 @@ struct SurveyWebView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "parallelTest")
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: SurveyWebView
         var loadedURL: URL?
 
@@ -503,6 +451,11 @@ struct SurveyWebView: UIViewRepresentable {
                 decisionHandler(.cancel)
                 UIApplication.shared.open(url)
             }
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "parallelTest" else { return }
+            parent.controller.handleParallelMessage(message.body)
         }
     }
 }

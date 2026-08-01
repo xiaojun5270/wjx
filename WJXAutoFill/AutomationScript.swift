@@ -70,20 +70,9 @@ enum AutomationScript {
 
         return #"""
         (() => {
-          const rules = #(json);
+          const rules = \#(json);
           const clean = value => (value || '').replace(/\s+/g, ' ').trim();
           const normalized = value => clean(value).toLocaleLowerCase('zh-CN');
-          const resolveDynamicAnswer = rawValue => {
-            const value = clean(rawValue);
-            const match = value.match(/^\{\{random_email(?::([^}]+))?\}\}$/i);
-            if (!match) return value;
-            const domain = clean(match[1] || 'example.com')
-              .replace(/^@+/, '')
-              .replace(/\s+/g, '') || 'example.com';
-            const timestamp = Date.now().toString(36);
-            const randomPart = Math.random().toString(36).slice(2, 10);
-            return `test_${timestamp}_${randomPart}@${domain}`;
-          };
           const visible = element => {
             if (!element) return false;
             const style = window.getComputedStyle(element);
@@ -123,7 +112,7 @@ enum AutomationScript {
 
           for (const rule of rules) {
             const question = normalized(rule.question);
-            const answer = resolveDynamicAnswer(rule.answer);
+            const answer = clean(rule.answer);
             if (!question || !answer) continue;
 
             const container = containers.find(candidate => normalized(candidate.innerText).includes(question));
@@ -184,6 +173,282 @@ enum AutomationScript {
           }
 
           return JSON.stringify({ status: 'ok', matched, filled, details });
+        })()
+        """#
+    }
+
+    static func parallelFill(
+        presets: [SubmissionPreset],
+        surveyURL: URL,
+        concurrency: Int,
+        runID: String
+    ) -> String? {
+        let tasks: [[String: Any]] = presets.compactMap { preset in
+            guard let fillScript = fill(rules: preset.usableRules) else { return nil }
+            return [
+                "name": preset.name,
+                "fillScript": fillScript
+            ]
+        }
+        let config: [String: Any] = [
+            "runID": runID,
+            "surveyURL": surveyURL.absoluteString,
+            "concurrency": max(1, min(concurrency, 10)),
+            "tasks": tasks,
+            "scanScript": scan,
+            "submitScript": submit
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: config),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        return #"""
+        (() => {
+          const config = \#(json);
+          const previous = window.__wjxParallelTest;
+          if (previous && typeof previous.cancel === 'function') previous.cancel(false);
+
+          const notify = payload => {
+            try {
+              window.webkit.messageHandlers.parallelTest.postMessage({
+                runID: config.runID,
+                ...payload
+              });
+            } catch (_) {}
+          };
+          const parseResult = value => {
+            if (typeof value === 'string') return JSON.parse(value);
+            return value || {};
+          };
+
+          const host = document.createElement('div');
+          host.id = `wjx-parallel-${config.runID}`;
+          host.style.cssText = 'position:fixed;left:-12000px;top:0;width:390px;height:844px;overflow:hidden;opacity:0.01;pointer-events:none;z-index:-2147483647;';
+          document.body.appendChild(host);
+
+          const runner = {
+            cancelled: false,
+            nextIndex: 0,
+            active: 0,
+            processed: 0,
+            succeeded: 0,
+            failed: 0,
+            frames: new Set(),
+            cancel(shouldNotify = true) {
+              if (this.cancelled) return;
+              this.cancelled = true;
+              for (const frame of this.frames) {
+                try { frame.remove(); } catch (_) {}
+              }
+              this.frames.clear();
+              try { host.remove(); } catch (_) {}
+              if (window.__wjxParallelTest === this) delete window.__wjxParallelTest;
+              if (shouldNotify) notify({ type: 'stopped' });
+            }
+          };
+          window.__wjxParallelTest = runner;
+
+          const total = config.tasks.length;
+          const concurrency = Math.max(1, Math.min(Number(config.concurrency) || 1, 10));
+
+          const evaluateInFrame = (task, script) => {
+            const frameWindow = task.frame.contentWindow;
+            if (!frameWindow) throw new Error('后台页面尚未就绪。');
+            return parseResult(frameWindow.eval(script));
+          };
+
+          const finishTask = (task, succeeded, errorMessage = '') => {
+            if (task.done || runner.cancelled) return;
+            task.done = true;
+            runner.active -= 1;
+            runner.processed += 1;
+            succeeded ? (runner.succeeded += 1) : (runner.failed += 1);
+            runner.frames.delete(task.frame);
+            try { task.frame.remove(); } catch (_) {}
+
+            notify({
+              type: 'progress',
+              completed: runner.processed,
+              succeeded: runner.succeeded,
+              failed: runner.failed,
+              active: runner.active,
+              total,
+              presetName: task.name,
+              error: errorMessage
+            });
+
+            if (runner.processed >= total) {
+              notify({
+                type: 'complete',
+                completed: runner.processed,
+                succeeded: runner.succeeded,
+                failed: runner.failed,
+                total
+              });
+              runner.cancel(false);
+            } else {
+              pump();
+            }
+          };
+
+          const stopAll = message => {
+            if (runner.cancelled) return;
+            notify({
+              type: 'fatal',
+              message,
+              completed: runner.processed,
+              succeeded: runner.succeeded,
+              failed: runner.failed,
+              total
+            });
+            runner.cancel(false);
+          };
+
+          const inspectSubmittedPage = task => {
+            let scanResult;
+            try {
+              scanResult = evaluateInFrame(task, config.scanScript);
+            } catch (error) {
+              finishTask(task, false, `无法读取提交结果：${error.message || error}`);
+              return;
+            }
+            if (scanResult.status === 'submitted') {
+              finishTask(task, true);
+            } else if (scanResult.status === 'captcha') {
+              stopAll('页面要求人机验证，后台并行测试已停止。');
+            } else if (scanResult.status === 'closed') {
+              stopAll(scanResult.message || '问卷当前不可提交。');
+            } else {
+              finishTask(task, false, '提交后仍停留在填写页面，可能有必填项或格式校验未通过。');
+            }
+          };
+
+          const handleFrameLoad = task => {
+            if (task.done || runner.cancelled) return;
+            try {
+              const href = task.frame.contentWindow && task.frame.contentWindow.location.href;
+              if (!href || href === 'about:blank') return;
+            } catch (error) {
+              finishTask(task, false, `后台页面发生跨域跳转：${error.message || error}`);
+              return;
+            }
+
+            if (task.phase === 'submitting') {
+              inspectSubmittedPage(task);
+              return;
+            }
+
+            let scanResult;
+            try {
+              scanResult = evaluateInFrame(task, config.scanScript);
+            } catch (error) {
+              finishTask(task, false, `无法读取后台页面：${error.message || error}`);
+              return;
+            }
+
+            if (scanResult.status === 'captcha') {
+              stopAll('页面要求人机验证，后台并行测试已停止。');
+              return;
+            }
+            if (scanResult.status === 'closed') {
+              stopAll(scanResult.message || '问卷当前不可填写。');
+              return;
+            }
+            if (scanResult.status !== 'ready' || !(scanResult.questions || []).length) {
+              finishTask(task, false, '后台页面没有检测到可填写题目。');
+              return;
+            }
+
+            let fillResult;
+            try {
+              fillResult = evaluateInFrame(task, task.fillScript);
+            } catch (error) {
+              finishTask(task, false, `自动填写失败：${error.message || error}`);
+              return;
+            }
+            if (!fillResult.filled) {
+              finishTask(task, false, '没有匹配到可填写控件。');
+              return;
+            }
+
+            let submitResult;
+            try {
+              submitResult = evaluateInFrame(task, config.submitScript);
+            } catch (error) {
+              finishTask(task, false, `触发提交失败：${error.message || error}`);
+              return;
+            }
+            if (submitResult.status === 'captcha') {
+              stopAll('页面要求人机验证，后台并行测试已停止。');
+              return;
+            }
+            if (submitResult.status !== 'scheduled') {
+              finishTask(task, false, submitResult.message || '当前页面无法提交。');
+              return;
+            }
+
+            task.phase = 'submitting';
+            setTimeout(() => {
+              if (!task.done && !runner.cancelled && task.phase === 'submitting') {
+                inspectSubmittedPage(task);
+              }
+            }, 5000);
+          };
+
+          const startTask = taskConfig => {
+            const frame = document.createElement('iframe');
+            frame.style.cssText = 'display:block;width:390px;height:844px;border:0;';
+            const task = {
+              name: taskConfig.name,
+              fillScript: taskConfig.fillScript,
+              frame,
+              phase: 'loading',
+              done: false
+            };
+            runner.active += 1;
+            runner.frames.add(frame);
+            frame.addEventListener('load', () => handleFrameLoad(task));
+            frame.addEventListener('error', () => finishTask(task, false, '后台页面加载失败。'));
+            frame.src = config.surveyURL;
+            host.appendChild(frame);
+          };
+
+          function pump() {
+            if (runner.cancelled) return;
+            while (runner.active < concurrency && runner.nextIndex < total) {
+              startTask(config.tasks[runner.nextIndex]);
+              runner.nextIndex += 1;
+            }
+          }
+
+          if (!total) {
+            notify({ type: 'fatal', message: '没有可用的测试预设。', total: 0 });
+            runner.cancel(false);
+            return JSON.stringify({ status: 'empty' });
+          }
+
+          notify({ type: 'started', completed: 0, succeeded: 0, failed: 0, active: 0, total });
+          pump();
+          return JSON.stringify({ status: 'started', total, concurrency });
+        })()
+        """#
+    }
+
+    static func cancelParallel(runID: String) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: [runID]),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return #"""
+        (() => {
+          const requestedRunID = \#(json)[0];
+          const runner = window.__wjxParallelTest;
+          if (runner && typeof runner.cancel === 'function') {
+            runner.cancel(false);
+            return JSON.stringify({ status: 'cancelled', runID: requestedRunID });
+          }
+          return JSON.stringify({ status: 'idle', runID: requestedRunID });
         })()
         """#
     }
