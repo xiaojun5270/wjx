@@ -31,6 +31,11 @@ final class SurveyWebController: ObservableObject {
     private var pendingScheduledBatch: (presets: [SubmissionPreset], surveyURL: URL)?
     private var batchScheduleWorkItem: DispatchWorkItem?
     private var batchScheduleTimer: Timer?
+    private var countdownResumeID: UUID?
+    private var navigationGeneration = 0
+    private var handledCountdownClickGeneration: Int?
+    private var pendingScheduledBatchID: UUID?
+    private var pendingScheduledBatchTimeoutWorkItem: DispatchWorkItem?
 
     private enum FillEvaluation {
         case success(matched: Int, filled: Int)
@@ -41,6 +46,7 @@ final class SurveyWebController: ObservableObject {
     deinit {
         batchScheduleWorkItem?.cancel()
         batchScheduleTimer?.invalidate()
+        pendingScheduledBatchTimeoutWorkItem?.cancel()
     }
 
     var isQueueRunning: Bool {
@@ -81,9 +87,10 @@ final class SurveyWebController: ObservableObject {
     }
 
     func shutdown() {
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         cancelScheduledBatch(logCancellation: false)
-        pendingScheduledBatch = nil
+        clearPendingScheduledBatch()
         if let runID = parallelRunID,
            let script = AutomationScript.cancelParallel(runID: runID) {
             webView?.evaluateJavaScript(script)
@@ -94,6 +101,12 @@ final class SurveyWebController: ObservableObject {
     }
 
     func reload() {
+        guard let webView else {
+            state = .failed("问卷页面不可用。")
+            appendLog("重新加载失败：问卷页面不可用。", level: .error, category: .page)
+            return
+        }
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         if !isQueueRunning {
             queueState = .idle
@@ -102,7 +115,13 @@ final class SurveyWebController: ObservableObject {
         canGoBack = false
         state = .loading
         appendLog("重新加载问卷页面。", category: .page)
-        webView?.reload()
+        guard webView.reload() != nil else {
+            let message = "网页未接受重新加载请求。"
+            state = .failed(message)
+            appendLog(message, level: .error, category: .page)
+            notice = UserNotice(title: "重新加载失败", message: message)
+            return
+        }
     }
 
     @discardableResult
@@ -110,23 +129,36 @@ final class SurveyWebController: ObservableObject {
         guard !isBusy, let webView else { return false }
         prepareForNewSurvey(url)
         appendLog("通过刷新全部重新打开问卷。", category: .page)
-        webView.load(
+        guard webView.load(
             URLRequest(
                 url: url,
                 cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
             )
-        )
+        ) != nil else {
+            let message = "网页未接受打开问卷的请求。"
+            state = .failed(message)
+            appendLog(message, level: .error, category: .page)
+            notice = UserNotice(title: "打开问卷失败", message: message)
+            return false
+        }
         return true
     }
 
     func goBack() {
         guard !isBusy,
               let webView, webView.canGoBack else { return }
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         hasAutoSubmittedCurrentForm = false
         state = .loading
         appendLog("返回上一页。", category: .page)
-        webView.goBack()
+        guard webView.goBack() != nil else {
+            let message = "网页未接受返回请求。"
+            state = .failed(message)
+            appendLog(message, level: .error, category: .page)
+            notice = UserNotice(title: "返回失败", message: message)
+            return
+        }
     }
 
     func fill(rules: [FillRule], silent: Bool = false) {
@@ -412,6 +444,7 @@ final class SurveyWebController: ObservableObject {
     }
 
     fileprivate func prepareForNewSurvey(_ url: URL) {
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         resetQueueSummary()
         isFilling = false
@@ -422,74 +455,398 @@ final class SurveyWebController: ObservableObject {
         appendLog("打开问卷：\(url.absoluteString)", category: .page)
     }
 
-    fileprivate func handleNavigationStarted(in webView: WKWebView) {
+    @discardableResult
+    fileprivate func handleNavigationStarted(in webView: WKWebView) -> Int {
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         state = .loading
         canGoBack = false
         if let url = webView.url {
             appendLog("正在加载页面：\(url.absoluteString)", category: .page)
         }
+        return navigationGeneration
     }
 
     fileprivate func updateNavigationState(from webView: WKWebView) {
         canGoBack = webView.canGoBack
     }
 
+    fileprivate func handleDraftRecoveryPromptAutoCancelled() {
+        appendLog(
+            "已自动取消“继续上次回答”提示，将使用当前页面重新填写。",
+            level: .success,
+            category: .page
+        )
+    }
+
     fileprivate func handlePageLoaded(
+        navigationGeneration expectedGeneration: Int,
         defaultRules: [FillRule],
         autoFillOnLoad: Bool,
         autoSubmitAfterFill: Bool,
         submitDelaySeconds: Int
     ) {
+        guard navigationGeneration == expectedGeneration else { return }
+        let generation = expectedGeneration
         if let webView {
             updateNavigationState(from: webView)
         }
-        scanPage { [weak self] scannedState in
-            guard let self else { return }
-            if let scheduled = self.pendingScheduledBatch {
-                self.pendingScheduledBatch = nil
-                guard case .ready(_) = scannedState else {
-                    let message = "整点刷新后问卷未进入可填写状态。"
-                    self.queueState = .stopped(message)
-                    self.queueSnapshot.detail = message
-                    self.appendLog(message, level: .warning, category: .batch)
-                    self.notice = UserNotice(title: "整点填写未启动", message: message)
+        installCountdownAutoStart(generation: generation) { [weak self] autoStartStatus in
+            guard let self, self.navigationGeneration == generation else { return }
+            if autoStartStatus == "clicked" {
+                self.state = .loading
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                    guard let self,
+                          self.navigationGeneration == generation,
+                          self.handledCountdownClickGeneration != generation else { return }
+                    self.handledCountdownClickGeneration = generation
+                    self.appendLog(
+                        "倒计时结束，已自动点击“立即开始”。",
+                        level: .success,
+                        category: .page
+                    )
+                    self.scheduleCountdownResume(
+                        generation: generation,
+                        defaultRules: defaultRules,
+                        autoFillOnLoad: autoFillOnLoad,
+                        autoSubmitAfterFill: autoSubmitAfterFill,
+                        submitDelaySeconds: submitDelaySeconds
+                    )
+                }
+                return
+            }
+            if autoStartStatus == "waiting" {
+                self.state = .loading
+                self.appendLog("检测到活动倒计时，等待自动点击“立即开始”。", category: .page)
+                return
+            }
+            self.scanPage(expectedNavigationGeneration: generation) { [weak self] scannedState in
+                guard let self, self.navigationGeneration == generation else { return }
+                self.processScannedPage(
+                    scannedState,
+                    generation: generation,
+                    defaultRules: defaultRules,
+                    autoFillOnLoad: autoFillOnLoad,
+                    autoSubmitAfterFill: autoSubmitAfterFill,
+                    submitDelaySeconds: submitDelaySeconds
+                )
+            }
+        }
+    }
+
+    fileprivate func handleCountdownAutoStartMessage(
+        _ body: Any,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        guard let payload = Self.dictionary(from: body),
+              let type = payload["type"] as? String,
+              type == "clicked" || type == "ready",
+              let generation = Self.integer(from: payload["generation"]),
+              generation == navigationGeneration,
+              handledCountdownClickGeneration != generation else { return }
+        handledCountdownClickGeneration = generation
+        if type == "clicked" {
+            let label = payload["label"] as? String ?? "立即开始"
+            appendLog("倒计时结束，已自动点击“\(label)”。", level: .success, category: .page)
+        } else {
+            appendLog("页面已进入可填写状态，正在检测题目。", level: .success, category: .page)
+        }
+        scheduleCountdownResume(
+            generation: generation,
+            defaultRules: defaultRules,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+    }
+
+    private func installCountdownAutoStart(
+        generation: Int,
+        completion: @escaping (String) -> Void
+    ) {
+        guard let webView else {
+            completion("unavailable")
+            return
+        }
+        let script = AutomationScript.installCountdownAutoStart(generation: generation)
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self, self.navigationGeneration == generation else { return }
+                guard error == nil,
+                      let payload = Self.dictionary(from: result),
+                      Self.integer(from: payload["generation"]) == generation else {
+                    completion("unavailable")
                     return
                 }
-                self.appendLog("整点刷新完成，开始同步填写 10 组。", category: .batch)
-                self.startParallelTest(
+                completion(payload["status"] as? String ?? "watching")
+            }
+        }
+    }
+
+    private func processScannedPage(
+        _ scannedState: SurveyPageState,
+        generation: Int,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        guard navigationGeneration == generation else { return }
+        switch scannedState {
+        case .ready(let questionCount) where questionCount > 0:
+            stopCountdownAutomation()
+        case .submitted, .closed, .captchaRequired:
+            stopCountdownAutomation()
+        case .loading, .ready, .failed:
+            break
+        }
+
+        if let scheduled = pendingScheduledBatch {
+            switch scannedState {
+            case .loading:
+                return
+            case .ready(let questionCount) where questionCount <= 0:
+                state = .loading
+                return
+            case .ready(let questionCount) where questionCount > 0:
+                clearPendingScheduledBatch()
+                appendLog("整点刷新完成，开始同步填写 10 组。", category: .batch)
+                startParallelTest(
                     presets: scheduled.presets,
                     surveyURL: scheduled.surveyURL
                 )
                 return
+            case .submitted(let message):
+                stopPendingScheduledBatch(
+                    message: "整点刷新进入已提交页面：\(message)",
+                    title: "整点填写未启动"
+                )
+                return
+            case .closed(let message):
+                stopPendingScheduledBatch(
+                    message: "整点刷新后问卷不可填写：\(message)",
+                    title: "整点填写未启动"
+                )
+                return
+            case .captchaRequired:
+                stopPendingScheduledBatch(
+                    message: "整点刷新后页面要求人机验证，批量填写未启动。请手动完成验证后重试。",
+                    title: "需要人机验证"
+                )
+                return
+            case .failed(let message):
+                appendLog(
+                    "整点刷新后暂时无法识别页面，正在重试：\(message)",
+                    level: .warning,
+                    category: .batch
+                )
+                scheduleCountdownResume(
+                    generation: generation,
+                    defaultRules: defaultRules,
+                    autoFillOnLoad: autoFillOnLoad,
+                    autoSubmitAfterFill: autoSubmitAfterFill,
+                    submitDelaySeconds: submitDelaySeconds
+                )
+                return
+            case .ready:
+                return
             }
-            if !self.isQueueRunning, autoFillOnLoad, case .ready(_) = scannedState {
-                if autoSubmitAfterFill {
-                    guard !self.hasAutoSubmittedCurrentForm else { return }
-                    self.fillAndSubmit(
-                        rules: defaultRules,
-                        submitDelaySeconds: submitDelaySeconds,
-                        silent: true
+        }
+
+        guard !isQueueRunning,
+              autoFillOnLoad,
+              case .ready(let questionCount) = scannedState,
+              questionCount > 0 else { return }
+        if autoSubmitAfterFill {
+            guard !hasAutoSubmittedCurrentForm else { return }
+            fillAndSubmit(
+                rules: defaultRules,
+                submitDelaySeconds: submitDelaySeconds,
+                silent: true
+            )
+        } else {
+            fill(rules: defaultRules, silent: true)
+        }
+    }
+
+    private func scheduleCountdownResume(
+        generation: Int,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        let resumeID = UUID()
+        countdownResumeID = resumeID
+        state = .loading
+        scheduleCountdownScan(
+            resumeID: resumeID,
+            generation: generation,
+            attempt: 0,
+            defaultRules: defaultRules,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+    }
+
+    private func scheduleCountdownScan(
+        resumeID: UUID,
+        generation: Int,
+        attempt: Int,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self,
+                  self.countdownResumeID == resumeID,
+                  self.navigationGeneration == generation else { return }
+            guard let webView = self.webView else {
+                self.failCountdownResume("问卷页面已关闭，无法继续检测活动题目。")
+                return
+            }
+            if webView.isLoading {
+                self.retryCountdownScan(
+                    resumeID: resumeID,
+                    generation: generation,
+                    attempt: attempt,
+                    defaultRules: defaultRules,
+                    autoFillOnLoad: autoFillOnLoad,
+                    autoSubmitAfterFill: autoSubmitAfterFill,
+                    submitDelaySeconds: submitDelaySeconds
+                )
+                return
+            }
+
+            self.scanPage(expectedNavigationGeneration: generation) { [weak self] scannedState in
+                guard let self,
+                      self.countdownResumeID == resumeID,
+                      self.navigationGeneration == generation else { return }
+                if case .ready(let questionCount) = scannedState,
+                   questionCount > 0 {
+                    self.cancelCountdownResume()
+                    self.processScannedPage(
+                        scannedState,
+                        generation: generation,
+                        defaultRules: defaultRules,
+                        autoFillOnLoad: autoFillOnLoad,
+                        autoSubmitAfterFill: autoSubmitAfterFill,
+                        submitDelaySeconds: submitDelaySeconds
                     )
-                } else {
-                    self.fill(rules: defaultRules, silent: true)
+                    return
+                }
+
+                switch scannedState {
+                case .submitted, .closed, .captchaRequired:
+                    self.cancelCountdownResume()
+                    self.processScannedPage(
+                        scannedState,
+                        generation: generation,
+                        defaultRules: defaultRules,
+                        autoFillOnLoad: autoFillOnLoad,
+                        autoSubmitAfterFill: autoSubmitAfterFill,
+                        submitDelaySeconds: submitDelaySeconds
+                    )
+                case .loading, .ready, .failed:
+                    self.retryCountdownScan(
+                        resumeID: resumeID,
+                        generation: generation,
+                        attempt: attempt,
+                        defaultRules: defaultRules,
+                        autoFillOnLoad: autoFillOnLoad,
+                        autoSubmitAfterFill: autoSubmitAfterFill,
+                        submitDelaySeconds: submitDelaySeconds
+                    )
                 }
             }
         }
     }
 
-    fileprivate func handleNavigationFailure(_ error: Error) {
+    private func retryCountdownScan(
+        resumeID: UUID,
+        generation: Int,
+        attempt: Int,
+        defaultRules: [FillRule],
+        autoFillOnLoad: Bool,
+        autoSubmitAfterFill: Bool,
+        submitDelaySeconds: Int
+    ) {
+        guard attempt < 59 else {
+            failCountdownResume("已点击“立即开始”，但未在 30 秒内检测到问卷题目。")
+            return
+        }
+        scheduleCountdownScan(
+            resumeID: resumeID,
+            generation: generation,
+            attempt: attempt + 1,
+            defaultRules: defaultRules,
+            autoFillOnLoad: autoFillOnLoad,
+            autoSubmitAfterFill: autoSubmitAfterFill,
+            submitDelaySeconds: submitDelaySeconds
+        )
+    }
+
+    private func cancelCountdownResume() {
+        countdownResumeID = nil
+    }
+
+    private func stopCountdownAutomation() {
+        let generationToStop = navigationGeneration
+        navigationGeneration &+= 1
+        handledCountdownClickGeneration = nil
+        cancelCountdownResume()
+        let script = AutomationScript.stopCountdownAutoStart(generation: generationToStop)
+        webView?.evaluateJavaScript(script)
+    }
+
+    private func failCountdownResume(_ message: String) {
+        stopCountdownAutomation()
+        state = .failed(message)
+        if pendingScheduledBatch != nil {
+            stopPendingScheduledBatch(message: message, title: "整点填写未启动")
+        } else {
+            appendLog(message, level: .warning, category: .page)
+            notice = UserNotice(title: "活动页面加载超时", message: message)
+        }
+    }
+
+    fileprivate func handleNavigationFailure(
+        _ error: Error,
+        navigationGeneration expectedGeneration: Int
+    ) {
+        guard navigationGeneration == expectedGeneration else { return }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.finishNavigationFailure(
+                    error,
+                    expectedGeneration: expectedGeneration
+                )
+            }
+            return
+        }
+        finishNavigationFailure(error, expectedGeneration: expectedGeneration)
+    }
+
+    private func finishNavigationFailure(
+        _ error: Error,
+        expectedGeneration: Int
+    ) {
+        guard navigationGeneration == expectedGeneration else { return }
         let message = error.localizedDescription
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         isFilling = false
         isSubmitting = false
         state = .failed(message)
         appendLog("页面加载失败：\(message)", level: .error, category: .page)
         if pendingScheduledBatch != nil {
-            pendingScheduledBatch = nil
-            queueState = .stopped(message)
-            queueSnapshot.detail = message
-            notice = UserNotice(title: "整点刷新失败", message: message)
+            stopPendingScheduledBatch(message: message, title: "整点刷新失败")
         }
         if isQueueRunning {
             stopQueue(message: "页面加载失败：\(message)", showNotice: true)
@@ -621,10 +978,22 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
-    fileprivate func scanPage(completion: ((SurveyPageState) -> Void)? = nil) {
-        webView?.evaluateJavaScript(AutomationScript.scan) { [weak self] result, error in
+    fileprivate func scanPage(
+        expectedNavigationGeneration: Int? = nil,
+        completion: ((SurveyPageState) -> Void)? = nil
+    ) {
+        guard let webView else {
+            state = .failed("问卷页面不可用。")
+            completion?(state)
+            return
+        }
+        webView.evaluateJavaScript(AutomationScript.scan) { [weak self] result, error in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self = self else { return }
+                if let expectedGeneration = expectedNavigationGeneration,
+                   self.navigationGeneration != expectedGeneration {
+                    return
+                }
                 let previousState = self.state
                 defer {
                     self.isSubmitting = false
@@ -781,21 +1150,53 @@ final class SurveyWebController: ObservableObject {
             return
         }
 
-        pendingScheduledBatch = scheduled
+        beginPendingScheduledBatch(scheduled)
+        stopCountdownAutomation()
         cancelPendingAutoSubmit()
         hasAutoSubmittedCurrentForm = false
         canGoBack = false
         state = .loading
         appendLog("到达活动整点，正在强制刷新问卷。", category: .batch)
         guard webView.reloadFromOrigin() != nil else {
-            pendingScheduledBatch = nil
             let message = "网页未接受刷新请求，整点任务已停止。"
-            queueState = .stopped(message)
-            queueSnapshot.detail = message
-            appendLog(message, level: .error, category: .batch)
-            notice = UserNotice(title: "整点刷新失败", message: message)
+            stopPendingScheduledBatch(message: message, title: "整点刷新失败")
             return
         }
+    }
+
+    private func beginPendingScheduledBatch(
+        _ scheduled: (presets: [SubmissionPreset], surveyURL: URL)
+    ) {
+        clearPendingScheduledBatch()
+        pendingScheduledBatch = scheduled
+        let pendingID = UUID()
+        pendingScheduledBatchID = pendingID
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.pendingScheduledBatchID == pendingID,
+                  self.pendingScheduledBatch != nil else { return }
+            self.stopCountdownAutomation()
+            let message = "整点刷新后等待活动开始超过 5 分钟，批量填写已停止。"
+            self.state = .failed(message)
+            self.stopPendingScheduledBatch(message: message, title: "等待活动开始超时")
+        }
+        pendingScheduledBatchTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 300, execute: workItem)
+    }
+
+    private func clearPendingScheduledBatch() {
+        pendingScheduledBatchTimeoutWorkItem?.cancel()
+        pendingScheduledBatchTimeoutWorkItem = nil
+        pendingScheduledBatchID = nil
+        pendingScheduledBatch = nil
+    }
+
+    private func stopPendingScheduledBatch(message: String, title: String) {
+        clearPendingScheduledBatch()
+        queueState = .stopped(message)
+        queueSnapshot.detail = message
+        appendLog(message, level: .warning, category: .batch)
+        notice = UserNotice(title: title, message: message)
     }
 
     private func cancelScheduledBatch(logCancellation: Bool) {
@@ -957,6 +1358,11 @@ final class SurveyWebController: ObservableObject {
         }
         return object as? [String: Any]
     }
+
+    private static func integer(from value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        return (value as? NSNumber)?.intValue
+    }
 }
 
 struct SurveyWebView: UIViewRepresentable {
@@ -977,9 +1383,11 @@ struct SurveyWebView: UIViewRepresentable {
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "parallelTest")
+        configuration.userContentController.add(context.coordinator, name: "countdownAutoStart")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.keyboardDismissMode = .interactive
         if #available(iOS 16.4, *) {
@@ -1004,23 +1412,36 @@ struct SurveyWebView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.parent.controller.shutdown()
+        uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "parallelTest")
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "countdownAutoStart")
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var parent: SurveyWebView
         var loadedURL: URL?
+        private var activeNavigation: WKNavigation?
+        private var activeNavigationGeneration: Int?
 
         init(parent: SurveyWebView) {
             self.parent = parent
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-            parent.controller.handleNavigationStarted(in: webView)
+            activeNavigation = navigation
+            activeNavigationGeneration = parent.controller.handleNavigationStarted(in: webView)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard let navigation = navigation,
+                  activeNavigation === navigation,
+                  let generation = activeNavigationGeneration else { return }
+            activeNavigation = nil
+            activeNavigationGeneration = nil
             parent.controller.handlePageLoaded(
+                navigationGeneration: generation,
                 defaultRules: parent.rules,
                 autoFillOnLoad: parent.autoFillOnLoad,
                 autoSubmitAfterFill: parent.autoSubmitAfterFill,
@@ -1029,13 +1450,29 @@ struct SurveyWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            guard let navigation = navigation,
+                  activeNavigation === navigation,
+                  let generation = activeNavigationGeneration else { return }
+            activeNavigation = nil
+            activeNavigationGeneration = nil
             parent.controller.updateNavigationState(from: webView)
-            parent.controller.handleNavigationFailure(error)
+            parent.controller.handleNavigationFailure(
+                error,
+                navigationGeneration: generation
+            )
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            guard let navigation = navigation,
+                  activeNavigation === navigation,
+                  let generation = activeNavigationGeneration else { return }
+            activeNavigation = nil
+            activeNavigationGeneration = nil
             parent.controller.updateNavigationState(from: webView)
-            parent.controller.handleNavigationFailure(error)
+            parent.controller.handleNavigationFailure(
+                error,
+                navigationGeneration: generation
+            )
         }
 
         func webView(
@@ -1059,9 +1496,84 @@ struct SurveyWebView: UIViewRepresentable {
             }
         }
 
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            if Self.isDraftRecoveryPrompt(message) {
+                parent.controller.handleDraftRecoveryPromptAutoCancelled()
+                completionHandler(false)
+                return
+            }
+
+            let alert = UIAlertController(
+                title: nil,
+                message: message,
+                preferredStyle: .alert
+            )
+            alert.addAction(
+                UIAlertAction(title: "取消", style: .cancel) { _ in
+                    completionHandler(false)
+                }
+            )
+            alert.addAction(
+                UIAlertAction(title: "确认", style: .default) { _ in
+                    completionHandler(true)
+                }
+            )
+
+            guard let presenter = Self.topViewController(
+                from: webView.window?.rootViewController
+            ) else {
+                completionHandler(false)
+                return
+            }
+            presenter.present(alert, animated: true)
+        }
+
+        private static func isDraftRecoveryPrompt(_ message: String) -> Bool {
+            let compactMessage = message.filter { !$0.isWhitespace }
+            return compactMessage.contains("回答了部分题目") &&
+                compactMessage.contains("继续上次")
+        }
+
+        private static func topViewController(
+            from rootViewController: UIViewController?
+        ) -> UIViewController? {
+            guard let rootViewController else { return nil }
+            if let presented = rootViewController.presentedViewController {
+                return topViewController(from: presented)
+            }
+            if let navigation = rootViewController as? UINavigationController {
+                return topViewController(from: navigation.visibleViewController)
+            }
+            if let tab = rootViewController as? UITabBarController {
+                return topViewController(from: tab.selectedViewController)
+            }
+            if let split = rootViewController as? UISplitViewController {
+                return topViewController(from: split.viewControllers.last)
+            }
+            return rootViewController
+        }
+
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == "parallelTest" else { return }
-            parent.controller.handleParallelMessage(message.body)
+            switch message.name {
+            case "parallelTest":
+                parent.controller.handleParallelMessage(message.body)
+            case "countdownAutoStart":
+                guard message.frameInfo.isMainFrame else { return }
+                parent.controller.handleCountdownAutoStartMessage(
+                    message.body,
+                    defaultRules: parent.rules,
+                    autoFillOnLoad: parent.autoFillOnLoad,
+                    autoSubmitAfterFill: parent.autoSubmitAfterFill,
+                    submitDelaySeconds: parent.submitDelaySeconds
+                )
+            default:
+                break
+            }
         }
     }
 }

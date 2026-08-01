@@ -49,7 +49,10 @@ struct ContentView: View {
                 SurveyPageView(
                     session: page,
                     store: store,
-                    isSelected: workspace.selectedPageID == page.id
+                    isSelected: workspace.selectedPageID == page.id,
+                    onSynchronizeSurveyURL: { value in
+                        workspace.synchronizeSurveyURL(value)
+                    }
                 )
                 .opacity(workspace.selectedPageID == page.id ? 1 : 0)
                 .allowsHitTesting(workspace.selectedPageID == page.id)
@@ -263,18 +266,21 @@ private struct SurveyPageView: View {
     @ObservedObject var store: RuleStore
     @ObservedObject private var webController: SurveyWebController
     let isSelected: Bool
+    let onSynchronizeSurveyURL: (String) -> Void
     @State private var showingRules = false
     @State private var showingLogs = false
 
     init(
         session: SurveyPageSession,
         store: RuleStore,
-        isSelected: Bool
+        isSelected: Bool,
+        onSynchronizeSurveyURL: @escaping (String) -> Void
     ) {
         _session = ObservedObject(wrappedValue: session)
         _store = ObservedObject(wrappedValue: store)
         _webController = ObservedObject(wrappedValue: session.controller)
         self.isSelected = isSelected
+        self.onSynchronizeSurveyURL = onSynchronizeSurveyURL
     }
 
     var body: some View {
@@ -316,6 +322,9 @@ private struct SurveyPageView: View {
                     submitDelaySeconds: submitDelaySecondsBinding,
                     isPresetSelectionLocked: true
                 )
+                    .onDisappear {
+                        onSynchronizeSurveyURL(session.surveyURLString)
+                    }
                     .presentationDetents([.large])
             }
             .sheet(isPresented: $showingLogs) {

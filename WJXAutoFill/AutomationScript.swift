@@ -69,6 +69,274 @@ enum AutomationScript {
     })()
     """#
 
+    static func installCountdownAutoStart(generation: Int) -> String {
+        #"""
+        (() => {
+          const storageKey = '__wjxCountdownAutoStart';
+          const generationKey = '__wjxAutomationGeneration';
+          const generation = \#(generation);
+          const latestGeneration = Number(window[generationKey]);
+          if (Number.isFinite(latestGeneration) && latestGeneration > generation) {
+            return JSON.stringify({ status: 'stale', generation });
+          }
+          window[generationKey] = generation;
+          const existing = window[storageKey];
+          if (existing && existing.generation === generation &&
+              typeof existing.inspect === 'function') {
+            return JSON.stringify({
+              status: existing.inspect(),
+              generation
+            });
+          }
+          if (existing && typeof existing.dispose === 'function') {
+            existing.dispose('replaced');
+          } else if (existing) {
+            delete window[storageKey];
+          }
+
+          const interactiveSelector =
+            'button, a, input[type="button"], input[type="submit"], [role="button"]';
+          const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+          const visible = element => {
+            if (!element) return false;
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.pointerEvents !== 'none' &&
+              Number(style.opacity || 1) > 0 &&
+              rect.width > 0 && rect.height > 0;
+          };
+          const exposed = element => {
+            if (!visible(element)) return false;
+            const rect = element.getBoundingClientRect();
+            const x = Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth - 1);
+            const y = Math.min(Math.max(rect.top + rect.height / 2, 0), window.innerHeight - 1);
+            const topElement = document.elementFromPoint(x, y);
+            const questionContainer = element.closest('[topic], div.field, fieldset');
+            return !!topElement && (
+              topElement === element ||
+              element.contains(topElement) ||
+              !!questionContainer?.contains(topElement)
+            );
+          };
+          const labelFor = element => clean(
+            element?.value || element?.innerText || element?.textContent
+          );
+          const actionLabelFor = element => labelFor(element).replace(/\s+/g, '');
+          const disabled = element =>
+            !!element?.disabled ||
+            element?.getAttribute('aria-disabled') === 'true' ||
+            Array.from(element?.classList || []).some(name =>
+              name.toLocaleLowerCase().includes('disabled')
+            );
+          const questionControls = () => Array.from(document.querySelectorAll(
+            '[topic] input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+            '[topic] textarea, [topic] select, [topic] [contenteditable="true"], ' +
+            'div.field input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+            'div.field textarea, div.field select, div.field [contenteditable="true"], ' +
+            'fieldset input:not([type="hidden"]):not([type="button"]):not([type="submit"]), ' +
+            'fieldset textarea, fieldset select, fieldset [contenteditable="true"]'
+          )).filter(visible);
+          const hasQuestionControls = () => questionControls().length > 0;
+          const hasExposedQuestionControls = () => questionControls().some(exposed);
+          const statusContainers = () => Array.from(document.querySelectorAll(
+            '#divTip, #divWorkError'
+          )).filter(visible);
+          const hasCountdownSignal = () => {
+            const containers = statusContainers();
+            const visibleCountdown = containers.some(container =>
+              Array.from(container.querySelectorAll('#countdownHtml')).some(visible)
+            );
+            if (visibleCountdown) return true;
+            const statusText = containers.map(container =>
+              clean(container.innerText || container.textContent)
+            ).join(' ');
+            const countdownText = /将于.{0,40}开放|距(?:离)?.{0,12}开始|活动(?:尚未|未)开始|问卷(?:尚未|未)开始|倒计时/;
+            const seconds = Number(window.leftSeconds);
+            return countdownText.test(statusText) ||
+              (containers.length > 0 && Number.isFinite(seconds) && seconds > 0);
+          };
+          const isTerminalPage = () => {
+            const path = (window.location.pathname || '').toLocaleLowerCase();
+            if (path.includes('/join/complete')) return true;
+            const text = statusContainers().map(container =>
+              clean(container.innerText || container.textContent)
+            ).join(' ');
+            if ([
+              '答卷已经提交', '提交成功！', '提交完成！', '感谢您的参与！',
+              '不能再接受新的答卷', '已达到发布者设置的最大填写份数',
+              '问卷已经结束', '问卷已停止', '该问卷不存在',
+              '请完成安全验证', '点击开始智能验证', '请先完成验证'
+            ].some(value => text.includes(value))) return true;
+            return Array.from(document.querySelectorAll(
+              '#captchaOut, #captcha, #captchabtn, #captchaWrap, .captcha-wrap, ' +
+              '.tcaptcha-transform, iframe[src*="captcha"], iframe[src*="verify"]'
+            )).some(visible);
+          };
+          const matchingStartButtons = () => {
+            const containers = statusContainers();
+            const countdownScopes = containers.flatMap(container =>
+              Array.from(container.querySelectorAll('#countdownHtml')).filter(visible)
+            );
+            const candidates = [...countdownScopes, ...containers].flatMap(scope =>
+              Array.from(scope.querySelectorAll(interactiveSelector))
+            );
+            return Array.from(new Set(candidates)).filter(element => {
+              if (!visible(element) || disabled(element) ||
+                  actionLabelFor(element) !== '立即开始') {
+                return false;
+              }
+              const nestedMatch = Array.from(
+                element.querySelectorAll?.(interactiveSelector) || []
+              ).some(child => visible(child) && actionLabelFor(child) === '立即开始');
+              return !nestedMatch;
+            });
+          };
+          const countdownStartButton = () => {
+            if (isTerminalPage()) return null;
+            const buttons = matchingStartButtons();
+            if (buttons.length === 1) return buttons[0];
+            if (buttons.length > 1) return null;
+            const fallback = document.querySelector('#cgstartbutton');
+            const fallbackLabel = actionLabelFor(fallback);
+            if (visible(fallback) && !disabled(fallback) &&
+                ['立即开始', '开始作答', '开始答题'].includes(fallbackLabel)) {
+              return fallback;
+            }
+            return null;
+          };
+
+          const state = {
+            generation,
+            clicked: false,
+            sawCountdown: false,
+            lastCountdownAt: 0,
+            notifiedReady: false,
+            hasInspected: false,
+            disposed: false,
+            observer: null,
+            timer: null,
+            unknownDeadline: Date.now() + 15000,
+            inspect: null,
+            dispose: null
+          };
+          const dispose = status => {
+            if (!state.disposed) {
+              state.disposed = true;
+              state.observer?.disconnect();
+              state.observer = null;
+              if (state.timer !== null) {
+                window.clearInterval(state.timer);
+                state.timer = null;
+              }
+            }
+            if (window[storageKey] === state) delete window[storageKey];
+            return status;
+          };
+          const notifyClicked = label => {
+            const handler = window.webkit?.messageHandlers?.countdownAutoStart;
+            handler?.postMessage({ type: 'clicked', label, generation });
+          };
+          const notifyReady = () => {
+            if (state.notifiedReady) return;
+            state.notifiedReady = true;
+            const handler = window.webkit?.messageHandlers?.countdownAutoStart;
+            handler?.postMessage({ type: 'ready', generation });
+          };
+          const inspect = () => {
+            const isFirstInspection = !state.hasInspected;
+            state.hasInspected = true;
+            if (state.clicked) return 'clicked';
+            if (state.disposed) return 'inactive';
+            const countdownVisible = hasCountdownSignal();
+            if (countdownVisible) {
+              state.sawCountdown = true;
+              state.lastCountdownAt = Date.now();
+            }
+            if (isTerminalPage()) {
+              return dispose('inactive');
+            }
+            const exposedQuestions = hasExposedQuestionControls();
+            const button = state.sawCountdown && (countdownVisible || !exposedQuestions)
+              ? countdownStartButton()
+              : null;
+            if (button) {
+              const label = labelFor(button);
+              state.clicked = true;
+              try {
+                button.click();
+              } catch (_) {
+                state.clicked = false;
+                return state.sawCountdown ? 'waiting' : 'watching';
+              }
+              dispose('clicked');
+              try { notifyClicked(label); } catch (_) {}
+              return 'clicked';
+            }
+            const hasQuestions = hasQuestionControls();
+            if (hasQuestions && exposedQuestions) {
+              if (state.sawCountdown || !isFirstInspection) {
+                try { notifyReady(); } catch (_) {}
+              }
+              return dispose('inactive');
+            }
+            if (countdownVisible ||
+                (state.sawCountdown && Date.now() - state.lastCountdownAt < 2000)) {
+              return 'waiting';
+            }
+            if (hasQuestions) {
+              if (state.sawCountdown || !isFirstInspection) {
+                try { notifyReady(); } catch (_) {}
+              }
+              return dispose('inactive');
+            }
+
+            if (!state.sawCountdown && Date.now() >= state.unknownDeadline) {
+              return dispose('inactive');
+            }
+            return state.sawCountdown ? 'waiting' : 'watching';
+          };
+
+          state.dispose = dispose;
+          state.inspect = inspect;
+          window[storageKey] = state;
+          state.observer = new MutationObserver(inspect);
+          state.observer.observe(document.documentElement, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['class', 'style', 'disabled', 'aria-disabled', 'value']
+          });
+          state.timer = window.setInterval(inspect, 250);
+
+          return JSON.stringify({ status: inspect(), generation });
+        })()
+        """#
+    }
+
+    static func stopCountdownAutoStart(generation: Int) -> String {
+        #"""
+        (() => {
+          const storageKey = '__wjxCountdownAutoStart';
+          const generationKey = '__wjxAutomationGeneration';
+          const generation = \#(generation);
+          const latestGeneration = Number(window[generationKey]);
+          if (!Number.isFinite(latestGeneration) || latestGeneration <= generation) {
+            window[generationKey] = generation + 1;
+          }
+          const state = window[storageKey];
+          if (!state || state.generation !== generation) return false;
+          if (typeof state.dispose === 'function') {
+            state.dispose('stopped');
+          }
+          if (window[storageKey] === state) delete window[storageKey];
+          return true;
+        })()
+        """#
+    }
+
     static func fill(rules: [FillRule]) -> String? {
         let payload = rules
             .filter { $0.isEnabled }

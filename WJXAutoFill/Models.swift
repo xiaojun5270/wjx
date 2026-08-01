@@ -505,6 +505,20 @@ final class SurveyWorkspace: ObservableObject {
         return pages.first { $0.id == selectedPageID } ?? pages.first
     }
 
+    func synchronizeSurveyURL(_ value: String) {
+        let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard RuleStore.validatedSurveyURL(from: normalizedValue) != nil else { return }
+
+        var didChange = false
+        for page in pages where page.surveyURLString != normalizedValue {
+            page.surveyURLString = normalizedValue
+            didChange = true
+        }
+        if didChange {
+            persistWorkspace()
+        }
+    }
+
     @discardableResult
     func addPage(
         defaultURLString: String,
