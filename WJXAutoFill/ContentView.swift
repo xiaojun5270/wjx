@@ -4,7 +4,6 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var store: RuleStore
     @StateObject private var workspace: SurveyWorkspace
-    @State private var pagePendingClose: UUID?
     @State private var workspaceNotice: UserNotice?
 
     init() {
@@ -34,23 +33,6 @@ struct ContentView: View {
                 pageStack()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }
-        .confirmationDialog(
-            "关闭页面？",
-            isPresented: Binding(
-                get: { pagePendingClose != nil },
-                set: { if !$0 { pagePendingClose = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("关闭页面", role: .destructive) {
-                guard let pagePendingClose else { return }
-                workspace.closePage(pagePendingClose)
-                self.pagePendingClose = nil
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("该页面的定时、填写和后台任务将停止。其他页面不受影响。")
         }
         .alert(item: $workspaceNotice) { notice in
             Alert(
@@ -96,25 +78,13 @@ struct ContentView: View {
                 .accessibilityLabel("刷新所有页面")
                 .help("刷新所有已打开页面")
 
-                Menu {
-                    Button {
-                        addPage(copyCurrent: false)
-                    } label: {
-                        Label("新建页面", systemImage: "plus")
-                    }
-
-                    Button {
-                        addPage(copyCurrent: true)
-                    } label: {
-                        Label("复制当前配置", systemImage: "doc.on.doc")
-                    }
-                } label: {
+                Button(action: addPage) {
                     Image(systemName: "plus")
                         .frame(width: isCompact ? 24 : 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .disabled(!workspace.canAddPage)
-                .help("添加页面")
+                .accessibilityLabel("新增页面")
+                .help("新增页面并沿用当前配置")
 
                 if isCompact {
                     Spacer(minLength: 0)
@@ -125,29 +95,46 @@ struct ContentView: View {
 
             Divider()
 
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(workspace.pages) { page in
-                        SurveyPageSidebarRow(
-                            page: page,
-                            presetName: presetName(for: page),
-                            isCompact: isCompact,
-                            isSelected: workspace.selectedPageID == page.id,
-                            canClose: workspace.pages.count > 1,
-                            onSelect: {
-                                workspace.selectedPageID = page.id
-                            },
-                            onClose: { pagePendingClose = page.id }
+            List {
+                ForEach(workspace.pages) { page in
+                    SurveyPageSidebarRow(
+                        page: page,
+                        presetName: presetName(for: page),
+                        isCompact: isCompact,
+                        isSelected: workspace.selectedPageID == page.id,
+                        onSelect: {
+                            workspace.selectedPageID = page.id
+                        }
+                    )
+                    .listRowInsets(
+                        EdgeInsets(
+                            top: 2,
+                            leading: isCompact ? 5 : 7,
+                            bottom: 2,
+                            trailing: isCompact ? 5 : 7
                         )
+                    )
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if workspace.pages.count > 1 {
+                            Button(role: .destructive) {
+                                workspace.closePage(page.id)
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
                     }
                 }
-                .padding(isCompact ? 5 : 7)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, isCompact ? 46 : 50)
 
             Divider()
             HStack {
                 Image(systemName: "rectangle.stack")
-                Text("\(workspace.pages.count) / \(SurveyWorkspace.maximumPageCount)")
+                Text("\(workspace.pages.count) 个")
                     .font(.caption.monospacedDigit())
                 if !isCompact { Spacer() }
             }
@@ -160,20 +147,8 @@ struct ContentView: View {
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
-    private func addPage(copyCurrent: Bool) {
-        let presetIDs = store.presets.map(\.id)
-        if copyCurrent {
-            workspace.duplicateSelectedPage(presetIDs: presetIDs)
-        } else {
-            workspace.addPage(
-                defaultURLString: store.surveyURLString,
-                defaultPresetID: store.selectedPresetID,
-                presetIDs: presetIDs,
-                autoFillOnLoad: store.autoFillOnLoad,
-                autoSubmitAfterFill: store.autoSubmitAfterFill,
-                submitDelaySeconds: store.submitDelaySeconds
-            )
-        }
+    private func addPage() {
+        workspace.duplicateSelectedPage(presetIDs: store.presets.map(\.id))
     }
 
     private func reloadAllPages() {
@@ -220,27 +195,21 @@ private struct SurveyPageSidebarRow: View {
     let presetName: String
     let isCompact: Bool
     let isSelected: Bool
-    let canClose: Bool
     let onSelect: () -> Void
-    let onClose: () -> Void
 
     init(
         page: SurveyPageSession,
         presetName: String,
         isCompact: Bool,
         isSelected: Bool,
-        canClose: Bool,
-        onSelect: @escaping () -> Void,
-        onClose: @escaping () -> Void
+        onSelect: @escaping () -> Void
     ) {
         _page = ObservedObject(wrappedValue: page)
         _controller = ObservedObject(wrappedValue: page.controller)
         self.presetName = presetName
         self.isCompact = isCompact
         self.isSelected = isSelected
-        self.canClose = canClose
         self.onSelect = onSelect
-        self.onClose = onClose
     }
 
     var body: some View {
@@ -260,18 +229,6 @@ private struct SurveyPageSidebarRow: View {
             }
 
             Spacer(minLength: isCompact ? 1 : 4)
-
-            if canClose {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.caption2.weight(.semibold))
-                        .frame(width: isCompact ? 18 : 26, height: isCompact ? 24 : 28)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("关闭\(page.title)")
-                .help("关闭页面")
-            }
         }
         .padding(.horizontal, isCompact ? 4 : 9)
         .frame(minHeight: isCompact ? 46 : 50)
@@ -302,21 +259,12 @@ private struct SurveyPageSidebarRow: View {
 }
 
 private struct SurveyPageView: View {
-    private enum ConfirmationAction {
-        case singleSubmit
-        case prepareBatch
-        case scheduleBatch
-        case submitPreparedBatch
-    }
-
     @ObservedObject var session: SurveyPageSession
     @ObservedObject var store: RuleStore
     @ObservedObject private var webController: SurveyWebController
     let isSelected: Bool
     @State private var showingRules = false
     @State private var showingLogs = false
-    @State private var showingConfirmation = false
-    @State private var confirmationAction: ConfirmationAction = .singleSubmit
 
     init(
         session: SurveyPageSession,
@@ -344,9 +292,6 @@ private struct SurveyPageView: View {
                             autoSubmitAfterFill: session.autoSubmitAfterFill,
                             submitDelaySeconds: session.submitDelaySeconds
                         )
-                    }
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        controlPanel
                     }
                 } else {
                     invalidURLView
@@ -377,15 +322,6 @@ private struct SurveyPageView: View {
                 AutomationLogView(controller: webController)
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
-            }
-            .confirmationDialog(
-                confirmationTitle,
-                isPresented: $showingConfirmation,
-                titleVisibility: .visible
-            ) {
-                confirmationButtons
-            } message: {
-                Text(confirmationMessage)
             }
             .alert(item: visibleNoticeBinding) { notice in
                 Alert(
@@ -489,232 +425,6 @@ private struct SurveyPageView: View {
         .animation(.easeInOut(duration: 0.2), value: webController.queueSnapshot.progress)
     }
 
-    private var controlPanel: some View {
-        VStack(spacing: 0) {
-            Divider()
-            presetAndLogRow
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-
-            Divider()
-
-            if webController.scheduledBatchTarget != nil {
-                scheduledBatchControls
-            } else if webController.isScheduledBatchRefreshing {
-                scheduledRefreshControls
-            } else if webController.isQueueRunning {
-                runningQueueControls
-            } else {
-                singleControls
-            }
-        }
-        .background(.regularMaterial)
-    }
-
-    private var presetAndLogRow: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: "person.text.rectangle")
-                Text(selectedPreset?.name ?? "对应预设")
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-                Text("\(selectedPreset?.completedFieldCount ?? 0)/3")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Image(systemName: "lock.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .foregroundStyle(.primary)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(selectedPreset?.name ?? "对应预设")，与页面编号固定对应")
-
-            Spacer(minLength: 4)
-
-            Button {
-                showingLogs = true
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: latestLogIcon)
-                        .foregroundStyle(latestLogColor)
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text(webController.logs.last?.category.rawValue ?? "日志")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(webController.logs.last?.title ?? "暂无记录")
-                            .font(.caption)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .frame(maxWidth: 190, alignment: .trailing)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var singleControls: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 10) {
-                Button {
-                    if session.autoSubmitAfterFill {
-                        webController.fillAndSubmit(
-                            rules: selectedPreset?.rules ?? [],
-                            submitDelaySeconds: session.submitDelaySeconds
-                        )
-                    } else {
-                        webController.fill(rules: selectedPreset?.rules ?? [])
-                    }
-                } label: {
-                    Label(fillButtonTitle, systemImage: "wand.and.stars")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!webController.canAttemptFill)
-
-                Button {
-                    confirmationAction = .singleSubmit
-                    showingConfirmation = true
-                } label: {
-                    Label("仅提交", systemImage: "paperplane.fill")
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!webController.canAttemptSubmit)
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    confirmationAction = .prepareBatch
-                    showingConfirmation = true
-                } label: {
-                    Label("同步填写 10 组", systemImage: "rectangle.3.group.fill")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!canStartQueue)
-
-                Button {
-                    confirmationAction = .scheduleBatch
-                    showingConfirmation = true
-                } label: {
-                    Label("下个整点执行", systemImage: "clock")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!canScheduleQueue)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-    }
-
-    private var scheduledBatchControls: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 10) {
-                Label("等待整点", systemImage: "clock.fill")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-                if let target = webController.scheduledBatchTarget {
-                    Text(target.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Text(formattedBatchCountdown)
-                    .font(.subheadline.monospacedDigit().weight(.semibold))
-            }
-
-            Button(role: .destructive) {
-                webController.cancelScheduledBatch()
-            } label: {
-                Label("取消整点任务", systemImage: "xmark.circle.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-    }
-
-    private var scheduledRefreshControls: some View {
-        HStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
-            Text("整点刷新中")
-                .font(.subheadline.weight(.medium))
-            Spacer()
-            Text("随后同步填写 10 组")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
-
-    private var runningQueueControls: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 14) {
-                if webController.isBatchSubmitting {
-                    queueMetric("成功", value: webController.queueSnapshot.succeeded, color: .green)
-                    queueMetric("失败", value: webController.queueSnapshot.failed, color: .red)
-                    queueMetric("待返回", value: webController.queueSnapshot.active, color: .blue)
-                } else {
-                    queueMetric("已填写", value: webController.batchPreparedCount, color: .green)
-                    queueMetric(
-                        "待填写",
-                        value: max(webController.queueSnapshot.total - webController.batchPreparedCount, 0),
-                        color: .blue
-                    )
-                }
-                Spacer(minLength: 4)
-                Text("\(webController.isBatchSubmitting ? webController.queueSnapshot.completed : webController.batchPreparedCount)/\(webController.queueSnapshot.total)")
-                    .font(.subheadline.monospacedDigit().weight(.semibold))
-            }
-
-            if webController.isBatchReadyToSubmit {
-                Button {
-                    confirmationAction = .submitPreparedBatch
-                    showingConfirmation = true
-                } label: {
-                    Label("同步提交 10 组", systemImage: "paperplane.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-            }
-
-            Button(role: .destructive) {
-                webController.stopTestQueue()
-            } label: {
-                Label("停止批量任务", systemImage: "stop.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-    }
-
-    private func queueMetric(_ title: String, value: Int, color: Color) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text("\(title) \(value)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private var invalidURLView: some View {
         VStack(spacing: 14) {
             Image(systemName: "link.badge.plus")
@@ -735,73 +445,6 @@ private struct SurveyPageView: View {
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemGroupedBackground))
-    }
-
-    @ViewBuilder
-    private var confirmationButtons: some View {
-        switch confirmationAction {
-        case .singleSubmit:
-            Button("提交当前页面", role: .destructive) {
-                webController.submitOnce()
-            }
-        case .prepareBatch:
-            Button("开始同步填写") {
-                guard let url = session.surveyURL else { return }
-                webController.startParallelTest(
-                    presets: store.queuePresets,
-                    surveyURL: url
-                )
-            }
-        case .scheduleBatch:
-            Button("设置整点任务") {
-                guard let url = session.surveyURL else { return }
-                webController.scheduleBatchAtNextHour(
-                    presets: store.queuePresets,
-                    surveyURL: url
-                )
-            }
-        case .submitPreparedBatch:
-            Button("同步提交 10 组", role: .destructive) {
-                webController.submitPreparedBatch()
-            }
-        }
-        Button("取消", role: .cancel) {}
-    }
-
-    private var confirmationTitle: String {
-        switch confirmationAction {
-        case .singleSubmit: return "确认提交"
-        case .prepareBatch: return "同步填写 10 组"
-        case .scheduleBatch: return "确认整点执行"
-        case .submitPreparedBatch: return "确认同步提交"
-        }
-    }
-
-    private var confirmationMessage: String {
-        switch confirmationAction {
-        case .singleSubmit:
-            return "将提交当前页面中的答案，仅执行一次。"
-        case .prepareBatch:
-            return "将同时打开并填写 10 个隐藏页面，填写完成后不会自动提交。"
-        case .scheduleBatch:
-            return "将在 \(nextWholeHour.formatted(date: .abbreviated, time: .shortened)) 强制刷新问卷并同步填写 10 组。请保持 App 在前台。"
-        case .submitPreparedBatch:
-            return "将同时触发 10 组提交。此操作更容易触发问卷星安全验证，提交后无法撤回。"
-        }
-    }
-
-    private var fillButtonTitle: String {
-        if webController.isFilling { return "填写中" }
-        if webController.isWaitingToSubmit { return "等待提交" }
-        if webController.isSubmitting { return "提交中" }
-        return session.autoSubmitAfterFill ? "填写并提交" : "自动填写"
-    }
-
-    private var nextWholeHour: Date {
-        let now = Date()
-        let hourStart = Calendar.current.dateInterval(of: .hour, for: now)?.start ?? now
-        return Calendar.current.date(byAdding: .hour, value: 1, to: hourStart)
-            ?? now.addingTimeInterval(3_600)
     }
 
     private var selectedPreset: SubmissionPreset? {
@@ -854,20 +497,6 @@ private struct SurveyPageView: View {
             (seconds % 3_600) / 60,
             seconds % 60
         )
-    }
-
-    private var canStartQueue: Bool {
-        guard store.isParallelReady, session.surveyURL != nil, !webController.isBusy else { return false }
-        switch webController.state {
-        case .ready(_), .submitted(_): return true
-        default: return false
-        }
-    }
-
-    private var canScheduleQueue: Bool {
-        guard store.isParallelReady, session.surveyURL != nil, !webController.isBusy else { return false }
-        if case .loading = webController.state { return false }
-        return true
     }
 
     private var statusTitle: String {
@@ -991,23 +620,6 @@ private struct SurveyPageView: View {
         }
     }
 
-    private var latestLogColor: Color {
-        switch webController.logs.last?.level {
-        case .success: return .green
-        case .warning: return .orange
-        case .error: return .red
-        case .info, .none: return .blue
-        }
-    }
-
-    private var latestLogIcon: String {
-        switch webController.logs.last?.level {
-        case .success: return "checkmark.circle.fill"
-        case .warning: return "exclamationmark.triangle.fill"
-        case .error: return "xmark.octagon.fill"
-        case .info, .none: return "info.circle.fill"
-        }
-    }
 }
 
 private struct AutomationLogView: View {

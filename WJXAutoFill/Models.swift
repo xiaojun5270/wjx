@@ -423,10 +423,33 @@ final class SurveyPageSession: ObservableObject, Identifiable {
 }
 
 final class SurveyWorkspace: ObservableObject {
-    static let maximumPageCount = 4
+    private enum Key {
+        static let snapshot = "surveyWorkspace.v1"
+    }
+
+    private struct PageSnapshot: Codable {
+        let id: UUID
+        let pageNumber: Int
+        let title: String
+        let surveyURLString: String
+        let selectedPresetID: UUID
+        let autoFillOnLoad: Bool
+        let autoSubmitAfterFill: Bool
+        let submitDelaySeconds: Int
+    }
+
+    private struct WorkspaceSnapshot: Codable {
+        let pages: [PageSnapshot]
+        let selectedPageID: UUID?
+    }
 
     @Published private(set) var pages: [SurveyPageSession]
-    @Published var selectedPageID: UUID?
+    @Published var selectedPageID: UUID? {
+        didSet { persistWorkspace() }
+    }
+
+    private let defaults: UserDefaults
+    private var pageObservers: [UUID: AnyCancellable] = [:]
 
     init(
         defaultURLString: String,
@@ -434,32 +457,52 @@ final class SurveyWorkspace: ObservableObject {
         presetIDs: [UUID],
         autoFillOnLoad: Bool,
         autoSubmitAfterFill: Bool,
-        submitDelaySeconds: Int
+        submitDelaySeconds: Int,
+        defaults: UserDefaults = .standard
     ) {
-        let firstPage = SurveyPageSession(
-            pageNumber: 1,
-            title: "页面 1",
-            surveyURLString: defaultURLString,
-            selectedPresetID: Self.correspondingPresetID(
-                for: 1,
+        self.defaults = defaults
+
+        let restoredSnapshot = defaults.data(forKey: Key.snapshot)
+            .flatMap { try? JSONDecoder().decode(WorkspaceSnapshot.self, from: $0) }
+        let restoredPages = restoredSnapshot.map {
+            Self.restorePages(
+                from: $0.pages,
                 presetIDs: presetIDs,
-                fallback: defaultPresetID
-            ),
-            autoFillOnLoad: autoFillOnLoad,
-            autoSubmitAfterFill: autoSubmitAfterFill,
-            submitDelaySeconds: submitDelaySeconds
-        )
-        pages = [firstPage]
-        selectedPageID = firstPage.id
+                fallbackPresetID: defaultPresetID
+            )
+        } ?? []
+
+        if restoredPages.isEmpty {
+            let firstPage = SurveyPageSession(
+                pageNumber: 1,
+                title: "页面 1",
+                surveyURLString: defaultURLString,
+                selectedPresetID: Self.correspondingPresetID(
+                    for: 1,
+                    presetIDs: presetIDs,
+                    fallback: defaultPresetID
+                ),
+                autoFillOnLoad: autoFillOnLoad,
+                autoSubmitAfterFill: autoSubmitAfterFill,
+                submitDelaySeconds: submitDelaySeconds
+            )
+            pages = [firstPage]
+            selectedPageID = firstPage.id
+        } else {
+            pages = restoredPages
+            let restoredSelectedID = restoredSnapshot?.selectedPageID
+            selectedPageID = restoredSelectedID.flatMap { selectedID in
+                restoredPages.contains(where: { $0.id == selectedID }) ? selectedID : nil
+            } ?? restoredPages.first?.id
+        }
+
+        observeAllPages()
+        persistWorkspace()
     }
 
     var selectedPage: SurveyPageSession? {
         guard let selectedPageID else { return pages.first }
         return pages.first { $0.id == selectedPageID } ?? pages.first
-    }
-
-    var canAddPage: Bool {
-        pages.count < Self.maximumPageCount
     }
 
     @discardableResult
@@ -471,7 +514,7 @@ final class SurveyWorkspace: ObservableObject {
         autoSubmitAfterFill: Bool,
         submitDelaySeconds: Int
     ) -> SurveyPageSession? {
-        guard canAddPage, let pageNumber = nextPageNumber() else { return nil }
+        guard let pageNumber = nextPageNumber() else { return nil }
         let page = SurveyPageSession(
             pageNumber: pageNumber,
             title: "页面 \(pageNumber)",
@@ -487,14 +530,14 @@ final class SurveyWorkspace: ObservableObject {
         )
         pages.append(page)
         pages.sort { $0.pageNumber < $1.pageNumber }
+        observePage(page)
         selectedPageID = page.id
         return page
     }
 
     @discardableResult
     func duplicateSelectedPage(presetIDs: [UUID]) -> SurveyPageSession? {
-        guard canAddPage,
-              let selectedPage,
+        guard let selectedPage,
               let pageNumber = nextPageNumber() else { return nil }
         let page = SurveyPageSession(
             pageNumber: pageNumber,
@@ -511,6 +554,7 @@ final class SurveyWorkspace: ObservableObject {
         )
         pages.append(page)
         pages.sort { $0.pageNumber < $1.pageNumber }
+        observePage(page)
         selectedPageID = page.id
         return page
     }
@@ -521,21 +565,25 @@ final class SurveyWorkspace: ObservableObject {
 
         let page = pages[index]
         page.controller.shutdown()
+        pageObservers.removeValue(forKey: pageID)
         pages.remove(at: index)
 
         if selectedPageID == pageID {
             let nextIndex = min(index, pages.count - 1)
             selectedPageID = pages[nextIndex].id
+        } else {
+            persistWorkspace()
         }
     }
 
     private func nextPageNumber() -> Int? {
-        for number in 1...Self.maximumPageCount {
-            if !pages.contains(where: { $0.pageNumber == number }) {
-                return number
-            }
+        let usedNumbers = Set(pages.map(\.pageNumber))
+        var number = 1
+        while usedNumbers.contains(number) {
+            guard number < Int.max else { return nil }
+            number += 1
         }
-        return nil
+        return number
     }
 
     private static func correspondingPresetID(
@@ -543,8 +591,78 @@ final class SurveyWorkspace: ObservableObject {
         presetIDs: [UUID],
         fallback: UUID
     ) -> UUID {
-        let index = pageNumber - 1
-        guard presetIDs.indices.contains(index) else { return fallback }
+        guard pageNumber > 0, !presetIDs.isEmpty else { return fallback }
+        let index = (pageNumber - 1) % presetIDs.count
         return presetIDs[index]
+    }
+
+    private static func restorePages(
+        from snapshots: [PageSnapshot],
+        presetIDs: [UUID],
+        fallbackPresetID: UUID
+    ) -> [SurveyPageSession] {
+        var usedIDs = Set<UUID>()
+        var usedNumbers = Set<Int>()
+
+        return snapshots
+            .sorted { $0.pageNumber < $1.pageNumber }
+            .compactMap { snapshot in
+                guard snapshot.pageNumber > 0,
+                      usedIDs.insert(snapshot.id).inserted,
+                      usedNumbers.insert(snapshot.pageNumber).inserted else {
+                    return nil
+                }
+
+                return SurveyPageSession(
+                    id: snapshot.id,
+                    pageNumber: snapshot.pageNumber,
+                    title: snapshot.title.isEmpty ? "页面 \(snapshot.pageNumber)" : snapshot.title,
+                    surveyURLString: snapshot.surveyURLString,
+                    selectedPresetID: Self.correspondingPresetID(
+                        for: snapshot.pageNumber,
+                        presetIDs: presetIDs,
+                        fallback: snapshot.selectedPresetID
+                    ),
+                    autoFillOnLoad: snapshot.autoFillOnLoad,
+                    autoSubmitAfterFill: snapshot.autoSubmitAfterFill,
+                    submitDelaySeconds: min(
+                        max(snapshot.submitDelaySeconds, 0),
+                        RuleStore.maximumSubmitDelaySeconds
+                    )
+                )
+            }
+    }
+
+    private func observeAllPages() {
+        pages.forEach(observePage)
+    }
+
+    private func observePage(_ page: SurveyPageSession) {
+        pageObservers[page.id] = page.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.persistWorkspace()
+            }
+        }
+    }
+
+    private func persistWorkspace() {
+        guard !pages.isEmpty else { return }
+        let snapshot = WorkspaceSnapshot(
+            pages: pages.map {
+                PageSnapshot(
+                    id: $0.id,
+                    pageNumber: $0.pageNumber,
+                    title: $0.title,
+                    surveyURLString: $0.surveyURLString,
+                    selectedPresetID: $0.selectedPresetID,
+                    autoFillOnLoad: $0.autoFillOnLoad,
+                    autoSubmitAfterFill: $0.autoSubmitAfterFill,
+                    submitDelaySeconds: $0.submitDelaySeconds
+                )
+            },
+            selectedPageID: selectedPageID
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: Key.snapshot)
     }
 }
