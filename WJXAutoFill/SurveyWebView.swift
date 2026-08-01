@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import UIKit
 import WebKit
@@ -11,6 +12,11 @@ final class SurveyWebController: ObservableObject {
     @Published private(set) var isWaitingToSubmit = false
     @Published private(set) var queueState: TestQueueState = .idle
     @Published private(set) var queueSnapshot = ParallelRunSnapshot()
+    @Published private(set) var batchPreparedCount = 0
+    @Published private(set) var isBatchReadyToSubmit = false
+    @Published private(set) var isBatchSubmitting = false
+    @Published private(set) var scheduledBatchTarget: Date?
+    @Published private(set) var batchScheduleRemainingSeconds = 0
     @Published private(set) var canGoBack = false
     @Published private(set) var logs: [AutomationLogEntry] = []
 
@@ -21,6 +27,10 @@ final class SurveyWebController: ObservableObject {
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var hasAutoSubmittedCurrentForm = false
     private var pendingAutoSubmitWorkItem: DispatchWorkItem?
+    private var scheduledBatch: (presets: [SubmissionPreset], surveyURL: URL)?
+    private var pendingScheduledBatch: (presets: [SubmissionPreset], surveyURL: URL)?
+    private var batchScheduleWorkItem: DispatchWorkItem?
+    private var batchScheduleTimer: Timer?
 
     private enum FillEvaluation {
         case success(matched: Int, filled: Int)
@@ -28,12 +38,22 @@ final class SurveyWebController: ObservableObject {
         case failed(String)
     }
 
+    deinit {
+        batchScheduleWorkItem?.cancel()
+        batchScheduleTimer?.invalidate()
+    }
+
     var isQueueRunning: Bool {
         queueSessionID != nil
     }
 
+    var isScheduledBatchRefreshing: Bool {
+        pendingScheduledBatch != nil
+    }
+
     var isBusy: Bool {
-        isFilling || isWaitingToSubmit || isSubmitting || isQueueRunning
+        isFilling || isWaitingToSubmit || isSubmitting || isQueueRunning ||
+            scheduledBatchTarget != nil || pendingScheduledBatch != nil
     }
 
     var canAttemptFill: Bool {
@@ -168,50 +188,35 @@ final class SurveyWebController: ObservableObject {
 
     func startParallelTest(
         presets: [SubmissionPreset],
-        surveyURL: URL,
-        concurrency: Int,
-        submitDelaySeconds: Int
+        surveyURL: URL
     ) {
         guard !isBusy else { return }
         guard let webView else {
-            appendLog("批量提交启动失败：问卷页面尚未加载。", level: .error, category: .batch)
-            notice = UserNotice(title: "无法启动测试", message: "问卷页面尚未加载。")
+            appendLog("同步填写启动失败：问卷页面尚未加载。", level: .error, category: .batch)
+            notice = UserNotice(title: "无法开始同步填写", message: "问卷页面尚未加载。")
             return
         }
 
-        let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(RuleStore.presetCount))
-        guard usablePresets.count == RuleStore.presetCount else {
-            appendLog("批量提交启动失败：10 组预设未填写完整。", level: .warning, category: .batch)
-            notice = UserNotice(title: "预设未填写完整", message: "请先完整填写 10 组不同的姓名、工号和固定邮箱。")
-            return
-        }
-
-        for keyword in SubmissionPreset.requiredQuestions {
-            let values = usablePresets.map { $0.answer(for: keyword).lowercased() }
-            guard Set(values).count == RuleStore.presetCount else {
-                appendLog("批量提交启动失败：10 组预设的\(keyword)存在重复。", level: .warning, category: .batch)
-                notice = UserNotice(title: "预设内容重复", message: "10 组预设的\(keyword)必须各不相同。")
-                return
-            }
-        }
+        guard let usablePresets = validatedBatchPresets(presets, action: "同步填写") else { return }
 
         let sessionID = UUID()
         let runID = sessionID.uuidString
         guard let script = AutomationScript.parallelFill(
             presets: usablePresets,
             surveyURL: surveyURL,
-            concurrency: concurrency,
-            submitDelaySeconds: submitDelaySeconds,
             runID: runID
         ) else {
-            appendLog("批量提交启动失败：无法生成后台任务。", level: .error, category: .batch)
-            notice = UserNotice(title: "无法启动测试", message: "生成后台任务失败。")
+            appendLog("同步填写启动失败：无法生成后台任务。", level: .error, category: .batch)
+            notice = UserNotice(title: "无法开始同步填写", message: "生成后台任务失败。")
             return
         }
 
         queuedPresets = usablePresets
         queueSessionID = sessionID
         parallelRunID = runID
+        batchPreparedCount = 0
+        isBatchReadyToSubmit = false
+        isBatchSubmitting = false
         queueState = .running(current: 0, total: usablePresets.count, presetName: "正在启动后台任务")
         queueSnapshot = ParallelRunSnapshot(
             completed: 0,
@@ -221,7 +226,7 @@ final class SurveyWebController: ObservableObject {
             active: 0,
             detail: "正在启动后台任务"
         )
-        appendLog("启动 \(usablePresets.count) 组任务：页面并行填写，按 \(submitDelaySeconds) 秒间隔逐组提交。", category: .batch)
+        appendLog("启动 \(usablePresets.count) 组同步填写任务；填写完成后等待手动提交。", category: .batch)
         beginBackgroundExecution()
 
         webView.evaluateJavaScript(script) { [weak self] result, error in
@@ -234,6 +239,77 @@ final class SurveyWebController: ObservableObject {
                 guard let payload = Self.dictionary(from: result),
                       payload["status"] as? String == "started" else {
                     self.stopQueue(message: "后台任务没有成功启动。", showNotice: true)
+                    return
+                }
+            }
+        }
+    }
+
+    func scheduleBatchAtNextHour(presets: [SubmissionPreset], surveyURL: URL) {
+        guard !isBusy else { return }
+        guard webView != nil else {
+            appendLog("整点任务设置失败：问卷页面尚未加载。", level: .error, category: .batch)
+            notice = UserNotice(title: "无法设置整点任务", message: "问卷页面尚未加载。")
+            return
+        }
+        guard let usablePresets = validatedBatchPresets(presets, action: "整点任务") else { return }
+
+        let now = Date()
+        let calendar = Calendar.current
+        let hourStart = calendar.dateInterval(of: .hour, for: now)?.start ?? now
+        let target = calendar.date(byAdding: .hour, value: 1, to: hourStart)
+            ?? now.addingTimeInterval(3_600)
+
+        cancelScheduledBatch(logCancellation: false)
+        resetQueueSummary()
+        scheduledBatch = (usablePresets, surveyURL)
+        scheduledBatchTarget = target
+        updateBatchScheduleCountdown()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.fireScheduledBatch()
+        }
+        batchScheduleWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(target.timeIntervalSinceNow, 0),
+            execute: workItem
+        )
+
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.updateBatchScheduleCountdown()
+        }
+        batchScheduleTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+
+        appendLog("整点任务已设置：\(target.formatted(date: .abbreviated, time: .standard))。", category: .batch)
+    }
+
+    func cancelScheduledBatch() {
+        cancelScheduledBatch(logCancellation: true)
+    }
+
+    func submitPreparedBatch() {
+        guard isQueueRunning, isBatchReadyToSubmit, !isBatchSubmitting else { return }
+        guard let webView,
+              let runID = parallelRunID,
+              let script = AutomationScript.submitPreparedParallel(runID: runID) else {
+            stopQueue(message: "已填写页面不可用，无法开始同步提交。", showNotice: true)
+            return
+        }
+
+        isBatchReadyToSubmit = false
+        isBatchSubmitting = true
+        appendLog("已手动确认，正在同时触发 10 组提交。", category: .batch)
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self, self.parallelRunID == runID else { return }
+                if let error {
+                    self.stopQueue(message: "同步提交启动失败：\(error.localizedDescription)", showNotice: true)
+                    return
+                }
+                guard let payload = Self.dictionary(from: result),
+                      payload["status"] as? String == "submitting" else {
+                    self.stopQueue(message: "同步提交没有成功启动，已填写页面可能已经失效。", showNotice: true)
                     return
                 }
             }
@@ -343,6 +419,23 @@ final class SurveyWebController: ObservableObject {
         }
         scanPage { [weak self] scannedState in
             guard let self else { return }
+            if let scheduled = self.pendingScheduledBatch {
+                self.pendingScheduledBatch = nil
+                guard case .ready(_) = scannedState else {
+                    let message = "整点刷新后问卷未进入可填写状态。"
+                    self.queueState = .stopped(message)
+                    self.queueSnapshot.detail = message
+                    self.appendLog(message, level: .warning, category: .batch)
+                    self.notice = UserNotice(title: "整点填写未启动", message: message)
+                    return
+                }
+                self.appendLog("整点刷新完成，开始同步填写 10 组。", category: .batch)
+                self.startParallelTest(
+                    presets: scheduled.presets,
+                    surveyURL: scheduled.surveyURL
+                )
+                return
+            }
             if !self.isQueueRunning, autoFillOnLoad, case .ready(_) = scannedState {
                 if autoSubmitAfterFill {
                     guard !self.hasAutoSubmittedCurrentForm else { return }
@@ -365,6 +458,12 @@ final class SurveyWebController: ObservableObject {
         isSubmitting = false
         state = .failed(message)
         appendLog("页面加载失败：\(message)", level: .error, category: .page)
+        if pendingScheduledBatch != nil {
+            pendingScheduledBatch = nil
+            queueState = .stopped(message)
+            queueSnapshot.detail = message
+            notice = UserNotice(title: "整点刷新失败", message: message)
+        }
         if isQueueRunning {
             stopQueue(message: "页面加载失败：\(message)", showNotice: true)
         }
@@ -398,38 +497,57 @@ final class SurveyWebController: ObservableObject {
                 active: active,
                 detail: detail
             )
-            appendLog("批量任务已启动：共 \(total) 组，提交将逐组执行。", category: .batch)
+            appendLog("同步填写已启动：共 \(total) 组，当前不会提交。", category: .batch)
 
-        case "queued":
-            let delaySeconds = payload["delaySeconds"] as? Int ?? 0
-            let queued = payload["queued"] as? Int ?? 0
-            let detail = "\(presetName) 已填写，等待提交"
-            queueState = .running(current: completed, total: total, presetName: detail)
+        case "prepared":
+            let prepared = payload["prepared"] as? Int ?? 0
+            batchPreparedCount = prepared
+            let detail = "已填写 \(prepared)/\(total)"
+            queueState = .running(current: prepared, total: total, presetName: detail)
             queueSnapshot = ParallelRunSnapshot(
-                completed: completed,
+                completed: prepared,
                 total: total,
-                succeeded: succeeded,
-                failed: failed,
+                succeeded: 0,
+                failed: 0,
                 active: active,
                 detail: detail
             )
-            appendLog("\(presetName)已填写，进入提交队列（队列 \(queued) 组，间隔 \(delaySeconds) 秒）。", category: .batch)
+            appendLog("\(presetName)已填写并保留；准备进度 \(prepared)/\(total)。", category: .batch)
 
-        case "submitting":
-            let detail = "正在提交 \(presetName)"
-            queueState = .running(current: completed, total: total, presetName: detail)
+        case "readyToSubmit":
+            let prepared = payload["prepared"] as? Int ?? total
+            batchPreparedCount = prepared
+            isBatchReadyToSubmit = true
+            let detail = "10 组已填写，等待手动提交"
+            queueState = .running(current: prepared, total: total, presetName: detail)
             queueSnapshot = ParallelRunSnapshot(
-                completed: completed,
+                completed: prepared,
                 total: total,
-                succeeded: succeeded,
-                failed: failed,
+                succeeded: 0,
+                failed: 0,
                 active: active,
                 detail: detail
             )
-            appendLog("开始提交\(presetName)；其余预设继续等待。", category: .batch)
+            appendLog("10 组全部填写完成，等待手动点击同步提交。", level: .success, category: .batch)
+
+        case "submittingAll":
+            isBatchReadyToSubmit = false
+            isBatchSubmitting = true
+            let detail = "10 组正在同步提交"
+            queueState = .running(current: 0, total: total, presetName: detail)
+            queueSnapshot = ParallelRunSnapshot(
+                completed: 0,
+                total: total,
+                succeeded: 0,
+                failed: 0,
+                active: active,
+                detail: detail
+            )
+            appendLog("10 组提交已同时触发，正在等待问卷星返回结果。", category: .batch)
 
         case "progress":
-            let detail = active > 0 ? "批量任务运行中" : "正在调度任务"
+            isBatchSubmitting = true
+            let detail = active > 0 ? "正在等待同步提交结果" : "正在汇总结果"
             queueState = .running(current: completed, total: total, presetName: detail)
             queueSnapshot = ParallelRunSnapshot(
                 completed: completed,
@@ -571,10 +689,111 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
+    private func validatedBatchPresets(
+        _ presets: [SubmissionPreset],
+        action: String
+    ) -> [SubmissionPreset]? {
+        let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(RuleStore.presetCount))
+        guard usablePresets.count == RuleStore.presetCount else {
+            appendLog("\(action)失败：10 组预设未填写完整。", level: .warning, category: .batch)
+            notice = UserNotice(
+                title: "预设未填写完整",
+                message: "请先完整填写 10 组不同的姓名、工号和固定邮箱。"
+            )
+            return nil
+        }
+
+        for keyword in SubmissionPreset.requiredQuestions {
+            let values = usablePresets.map { $0.answer(for: keyword).lowercased() }
+            guard Set(values).count == RuleStore.presetCount else {
+                appendLog("\(action)失败：10 组预设的\(keyword)存在重复。", level: .warning, category: .batch)
+                notice = UserNotice(
+                    title: "预设内容重复",
+                    message: "10 组预设的\(keyword)必须各不相同。"
+                )
+                return nil
+            }
+        }
+        return usablePresets
+    }
+
+    private func updateBatchScheduleCountdown() {
+        guard let target = scheduledBatchTarget else {
+            batchScheduleRemainingSeconds = 0
+            return
+        }
+        batchScheduleRemainingSeconds = max(Int(ceil(target.timeIntervalSinceNow)), 0)
+    }
+
+    private func fireScheduledBatch() {
+        guard let target = scheduledBatchTarget,
+              let scheduled = scheduledBatch else { return }
+
+        batchScheduleWorkItem = nil
+        batchScheduleTimer?.invalidate()
+        batchScheduleTimer = nil
+        scheduledBatchTarget = nil
+        scheduledBatch = nil
+        batchScheduleRemainingSeconds = 0
+
+        let lateness = Date().timeIntervalSince(target)
+        guard UIApplication.shared.applicationState == .active, lateness <= 2 else {
+            let message = "App 未在整点保持前台，定时任务已取消。"
+            queueState = .stopped(message)
+            queueSnapshot.detail = message
+            appendLog(message, level: .warning, category: .batch)
+            notice = UserNotice(title: "错过整点执行", message: message)
+            return
+        }
+        guard let webView else {
+            let message = "问卷页面不可用，无法执行整点刷新。"
+            queueState = .stopped(message)
+            queueSnapshot.detail = message
+            appendLog(message, level: .error, category: .batch)
+            notice = UserNotice(title: "整点刷新失败", message: message)
+            return
+        }
+
+        pendingScheduledBatch = scheduled
+        cancelPendingAutoSubmit()
+        hasAutoSubmittedCurrentForm = false
+        canGoBack = false
+        state = .loading
+        appendLog("到达活动整点，正在强制刷新问卷。", category: .batch)
+        guard webView.reloadFromOrigin() != nil else {
+            pendingScheduledBatch = nil
+            let message = "网页未接受刷新请求，整点任务已停止。"
+            queueState = .stopped(message)
+            queueSnapshot.detail = message
+            appendLog(message, level: .error, category: .batch)
+            notice = UserNotice(title: "整点刷新失败", message: message)
+            return
+        }
+    }
+
+    private func cancelScheduledBatch(logCancellation: Bool) {
+        let hadSchedule = scheduledBatchTarget != nil
+        batchScheduleWorkItem?.cancel()
+        batchScheduleWorkItem = nil
+        batchScheduleTimer?.invalidate()
+        batchScheduleTimer = nil
+        scheduledBatchTarget = nil
+        scheduledBatch = nil
+        batchScheduleRemainingSeconds = 0
+        if hadSchedule, logCancellation {
+            queueState = .idle
+            queueSnapshot = ParallelRunSnapshot()
+            appendLog("整点任务已取消。", level: .warning, category: .batch)
+        }
+    }
+
     private func clearQueueSession() {
         queueSessionID = nil
         queuedPresets = []
         parallelRunID = nil
+        batchPreparedCount = 0
+        isBatchReadyToSubmit = false
+        isBatchSubmitting = false
         isSubmitting = false
         endBackgroundExecution()
     }
@@ -584,7 +803,7 @@ final class SurveyWebController: ObservableObject {
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WJXParallelTest") { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.isQueueRunning else { return }
-                self.stopQueue(message: "iOS 后台执行时间已到，测试任务已停止。", showNotice: true)
+                self.stopQueue(message: "iOS 后台执行时间已到，批量任务已停止。", showNotice: true)
             }
         }
     }
@@ -727,7 +946,8 @@ struct SurveyWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        // Keep WJX draft-recovery state from carrying across app launches.
+        configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "parallelTest")
 

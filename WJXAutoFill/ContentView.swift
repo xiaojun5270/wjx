@@ -1,9 +1,12 @@
+import Foundation
 import SwiftUI
 
 struct ContentView: View {
     private enum ConfirmationAction {
         case singleSubmit
-        case testQueue
+        case prepareBatch
+        case scheduleBatch
+        case submitPreparedBatch
     }
 
     @StateObject private var store = RuleStore()
@@ -161,7 +164,11 @@ struct ContentView: View {
 
             Divider()
 
-            if webController.isQueueRunning {
+            if webController.scheduledBatchTarget != nil {
+                scheduledBatchControls
+            } else if webController.isScheduledBatchRefreshing {
+                scheduledRefreshControls
+            } else if webController.isQueueRunning {
                 runningQueueControls
             } else {
                 singleControls
@@ -258,37 +265,107 @@ struct ContentView: View {
                 .disabled(!webController.canAttemptSubmit)
             }
 
-            Button {
-                confirmationAction = .testQueue
-                showingConfirmation = true
-            } label: {
-                HStack {
-                    Label("提交 10 组预设", systemImage: "rectangle.3.group.fill")
-                    Spacer()
-                    Text(batchReadinessText)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Button {
+                    confirmationAction = .prepareBatch
+                    showingConfirmation = true
+                } label: {
+                    Label("同步填写 10 组", systemImage: "rectangle.3.group.fill")
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .buttonStyle(.bordered)
+                .disabled(!canStartQueue)
+
+                Button {
+                    confirmationAction = .scheduleBatch
+                    showingConfirmation = true
+                } label: {
+                    Label("下个整点执行", systemImage: "clock")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canScheduleQueue)
             }
-            .buttonStyle(.bordered)
-            .disabled(!canStartQueue)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 
+    private var scheduledBatchControls: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                Label("等待整点", systemImage: "clock.fill")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                if let target = webController.scheduledBatchTarget {
+                    Text(target.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(formattedBatchCountdown)
+                    .font(.subheadline.monospacedDigit().weight(.semibold))
+            }
+
+            Button(role: .destructive) {
+                webController.cancelScheduledBatch()
+            } label: {
+                Label("取消整点任务", systemImage: "xmark.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var scheduledRefreshControls: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("整点刷新中")
+                .font(.subheadline.weight(.medium))
+            Spacer()
+            Text("随后同步填写 10 组")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+    }
+
     private var runningQueueControls: some View {
         VStack(spacing: 9) {
             HStack(spacing: 14) {
-                queueMetric("成功", value: webController.queueSnapshot.succeeded, color: .green)
-                queueMetric("失败", value: webController.queueSnapshot.failed, color: .red)
-                queueMetric("运行中", value: webController.queueSnapshot.active, color: .blue)
+                if webController.isBatchSubmitting {
+                    queueMetric("成功", value: webController.queueSnapshot.succeeded, color: .green)
+                    queueMetric("失败", value: webController.queueSnapshot.failed, color: .red)
+                    queueMetric("待返回", value: webController.queueSnapshot.active, color: .blue)
+                } else {
+                    queueMetric("已填写", value: webController.batchPreparedCount, color: .green)
+                    queueMetric(
+                        "待填写",
+                        value: max(webController.queueSnapshot.total - webController.batchPreparedCount, 0),
+                        color: .blue
+                    )
+                }
                 Spacer(minLength: 4)
-                Text("\(webController.queueSnapshot.completed)/\(webController.queueSnapshot.total)")
+                Text("\(webController.isBatchSubmitting ? webController.queueSnapshot.completed : webController.batchPreparedCount)/\(webController.queueSnapshot.total)")
                     .font(.subheadline.monospacedDigit().weight(.semibold))
+            }
+
+            if webController.isBatchReadyToSubmit {
+                Button {
+                    confirmationAction = .submitPreparedBatch
+                    showingConfirmation = true
+                } label: {
+                    Label("同步提交 10 组", systemImage: "paperplane.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
             }
 
             Button(role: .destructive) {
@@ -343,15 +420,25 @@ struct ContentView: View {
             Button("提交当前页面", role: .destructive) {
                 webController.submitOnce()
             }
-        case .testQueue:
-            Button("启动 10 组任务", role: .destructive) {
+        case .prepareBatch:
+            Button("开始同步填写") {
                 guard let url = store.surveyURL else { return }
                 webController.startParallelTest(
                     presets: store.queuePresets,
-                    surveyURL: url,
-                    concurrency: store.parallelConcurrency,
-                    submitDelaySeconds: store.submitDelaySeconds
+                    surveyURL: url
                 )
+            }
+        case .scheduleBatch:
+            Button("设置整点任务") {
+                guard let url = store.surveyURL else { return }
+                webController.scheduleBatchAtNextHour(
+                    presets: store.queuePresets,
+                    surveyURL: url
+                )
+            }
+        case .submitPreparedBatch:
+            Button("同步提交 10 组", role: .destructive) {
+                webController.submitPreparedBatch()
             }
         }
         Button("取消", role: .cancel) {}
@@ -360,7 +447,9 @@ struct ContentView: View {
     private var confirmationTitle: String {
         switch confirmationAction {
         case .singleSubmit: return "确认提交"
-        case .testQueue: return "确认批量提交"
+        case .prepareBatch: return "同步填写 10 组"
+        case .scheduleBatch: return "确认整点执行"
+        case .submitPreparedBatch: return "确认同步提交"
         }
     }
 
@@ -368,8 +457,12 @@ struct ContentView: View {
         switch confirmationAction {
         case .singleSubmit:
             return "将提交当前页面中的答案，仅执行一次。"
-        case .testQueue:
-            return "10 个页面并行填写，提交时严格逐组执行，每组间隔 \(store.submitDelaySeconds) 秒。"
+        case .prepareBatch:
+            return "将同时打开并填写 10 个隐藏页面，填写完成后不会自动提交。"
+        case .scheduleBatch:
+            return "将在 \(nextWholeHour.formatted(date: .abbreviated, time: .shortened)) 强制刷新问卷并同步填写 10 组。请保持 App 在前台。"
+        case .submitPreparedBatch:
+            return "将同时触发 10 组提交。此操作更容易触发问卷星安全验证，提交后无法撤回。"
         }
     }
 
@@ -380,8 +473,21 @@ struct ContentView: View {
         return store.autoSubmitAfterFill ? "填写并提交" : "自动填写"
     }
 
-    private var batchReadinessText: String {
-        store.parallelValidationMessage ?? "已就绪"
+    private var nextWholeHour: Date {
+        let now = Date()
+        let hourStart = Calendar.current.dateInterval(of: .hour, for: now)?.start ?? now
+        return Calendar.current.date(byAdding: .hour, value: 1, to: hourStart)
+            ?? now.addingTimeInterval(3_600)
+    }
+
+    private var formattedBatchCountdown: String {
+        let seconds = max(webController.batchScheduleRemainingSeconds, 0)
+        return String(
+            format: "%02d:%02d:%02d",
+            seconds / 3_600,
+            (seconds % 3_600) / 60,
+            seconds % 60
+        )
     }
 
     private var canStartQueue: Bool {
@@ -392,8 +498,18 @@ struct ContentView: View {
         }
     }
 
+    private var canScheduleQueue: Bool {
+        guard store.isParallelReady, store.surveyURL != nil, !webController.isBusy else { return false }
+        if case .loading = webController.state { return false }
+        return true
+    }
+
     private var statusTitle: String {
-        if webController.isQueueRunning { return "批量任务进行中" }
+        if webController.scheduledBatchTarget != nil { return "等待活动整点" }
+        if webController.isScheduledBatchRefreshing { return "正在整点刷新" }
+        if webController.isBatchReadyToSubmit { return "等待手动提交" }
+        if webController.isBatchSubmitting { return "10 组正在同步提交" }
+        if webController.isQueueRunning { return "正在同步填写" }
         if webController.isFilling { return "正在填写当前预设" }
         if webController.isWaitingToSubmit { return "等待自动提交" }
         if webController.isSubmitting { return "正在提交问卷" }
@@ -415,9 +531,21 @@ struct ContentView: View {
     }
 
     private var statusDetail: String {
+        if let target = webController.scheduledBatchTarget {
+            return "\(target.formatted(date: .abbreviated, time: .shortened)) · \(formattedBatchCountdown)"
+        }
+        if webController.isScheduledBatchRefreshing {
+            return "刷新完成后自动同步填写 10 组"
+        }
         if webController.isQueueRunning {
             let snapshot = webController.queueSnapshot
-            return "已完成 \(snapshot.completed)/\(snapshot.total) · \(snapshot.detail)"
+            if webController.isBatchReadyToSubmit {
+                return "已填写 \(webController.batchPreparedCount)/\(snapshot.total) · 点击下方按钮提交"
+            }
+            if webController.isBatchSubmitting {
+                return "已返回 \(snapshot.completed)/\(snapshot.total) · \(snapshot.detail)"
+            }
+            return "已填写 \(webController.batchPreparedCount)/\(snapshot.total) · \(snapshot.detail)"
         }
         if webController.isFilling {
             return "使用 \(store.selectedPreset?.name ?? "当前预设")"
@@ -448,6 +576,10 @@ struct ContentView: View {
     }
 
     private var statusIcon: String {
+        if webController.scheduledBatchTarget != nil { return "clock.fill" }
+        if webController.isScheduledBatchRefreshing { return "arrow.clockwise" }
+        if webController.isBatchReadyToSubmit { return "hand.tap.fill" }
+        if webController.isBatchSubmitting { return "paperplane.fill" }
         if webController.isQueueRunning { return "arrow.triangle.2.circlepath" }
         if webController.isFilling { return "wand.and.stars" }
         if webController.isWaitingToSubmit { return "timer" }
@@ -470,6 +602,9 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
+        if webController.scheduledBatchTarget != nil { return .orange }
+        if webController.isScheduledBatchRefreshing { return .blue }
+        if webController.isBatchReadyToSubmit { return .green }
         if webController.isQueueRunning || webController.isFilling ||
             webController.isWaitingToSubmit || webController.isSubmitting {
             return .blue

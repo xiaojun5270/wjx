@@ -148,7 +148,6 @@ final class RuleStore: ObservableObject {
         static let autoFill = "autoFillOnLoad.v1"
         static let autoSubmit = "autoSubmitAfterFill.v1"
         static let submitDelay = "submitDelaySeconds.v1"
-        static let parallelConcurrency = "parallelConcurrency.v2"
     }
 
     private let defaults: UserDefaults
@@ -174,7 +173,6 @@ final class RuleStore: ObservableObject {
     }
 
     @Published private(set) var submitDelaySeconds: Int
-    @Published private(set) var parallelConcurrency: Int
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -202,9 +200,6 @@ final class RuleStore: ObservableObject {
             submitDelaySeconds = 2
         }
 
-        // 固定十组任务同时启动；使用新键，避免旧版本保存的 3/5 并发继续生效。
-        parallelConcurrency = Self.presetCount
-
         let rawPresets: [SubmissionPreset]
         if let data = defaults.data(forKey: Key.presets),
            let decoded = try? JSONDecoder().decode([SubmissionPreset].self, from: data),
@@ -229,7 +224,6 @@ final class RuleStore: ObservableObject {
             selectedPresetID = loadedPresets[0].id
         }
 
-        defaults.set(parallelConcurrency, forKey: Key.parallelConcurrency)
         persistPresets()
     }
 

@@ -191,8 +191,6 @@ enum AutomationScript {
     static func parallelFill(
         presets: [SubmissionPreset],
         surveyURL: URL,
-        concurrency: Int,
-        submitDelaySeconds: Int,
         runID: String
     ) -> String? {
         let tasks: [[String: Any]] = presets.compactMap { preset in
@@ -205,8 +203,6 @@ enum AutomationScript {
         let config: [String: Any] = [
             "runID": runID,
             "surveyURL": surveyURL.absoluteString,
-            "concurrency": max(1, min(concurrency, 10)),
-            "submitDelayMilliseconds": min(max(submitDelaySeconds, 0), 300) * 1_000,
             "tasks": tasks,
             "scanScript": scan,
             "submitScript": submit
@@ -241,21 +237,19 @@ enum AutomationScript {
           document.body.appendChild(host);
 
           const runner = {
+            runID: config.runID,
             cancelled: false,
-            nextIndex: 0,
             active: 0,
+            prepared: 0,
             processed: 0,
             succeeded: 0,
             failed: 0,
+            submissionStarted: false,
             frames: new Set(),
             submitQueue: [],
-            submitInFlight: false,
-            submitTimer: null,
             cancel(shouldNotify = true) {
               if (this.cancelled) return;
               this.cancelled = true;
-              if (this.submitTimer) clearTimeout(this.submitTimer);
-              this.submitTimer = null;
               this.submitQueue = [];
               for (const frame of this.frames) {
                 try { frame.remove(); } catch (_) {}
@@ -269,11 +263,6 @@ enum AutomationScript {
           window.__wjxParallelTest = runner;
 
           const total = config.tasks.length;
-          const concurrency = Math.max(1, Math.min(Number(config.concurrency) || 1, 10));
-          const submitDelayMilliseconds = Math.max(
-            0,
-            Math.min(Number(config.submitDelayMilliseconds) || 0, 300000)
-          );
 
           const evaluateInFrame = (task, script) => {
             const frameWindow = task.frame.contentWindow;
@@ -283,9 +272,11 @@ enum AutomationScript {
 
           const finishTask = (task, succeeded, errorMessage = '') => {
             if (task.done || runner.cancelled) return;
-            const completedSubmission = task.phase === 'submitting';
+            if (task.phase !== 'submitting') {
+              stopAll(`${task.name}准备失败：${errorMessage || '无法完成自动填写。'}`);
+              return;
+            }
             task.done = true;
-            if (completedSubmission) runner.submitInFlight = false;
             runner.active -= 1;
             runner.processed += 1;
             succeeded ? (runner.succeeded += 1) : (runner.failed += 1);
@@ -312,9 +303,6 @@ enum AutomationScript {
                 total
               });
               runner.cancel(false);
-            } else {
-              pump();
-              scheduleNextSubmit();
             }
           };
 
@@ -492,15 +480,6 @@ enum AutomationScript {
           const submitFilledTask = task => {
             if (task.done || runner.cancelled || task.phase !== 'queued-for-submit') return;
             task.phase = 'submitting';
-            notify({
-              type: 'submitting',
-              completed: runner.processed,
-              succeeded: runner.succeeded,
-              failed: runner.failed,
-              active: runner.active,
-              total,
-              presetName: task.name
-            });
 
             let submitResult;
             try {
@@ -525,25 +504,26 @@ enum AutomationScript {
             }, 8000);
           };
 
-          function scheduleNextSubmit() {
-            if (
-              runner.cancelled || runner.submitInFlight || runner.submitTimer ||
-              !runner.submitQueue.length
-            ) return;
+          runner.submitAll = () => {
+            if (runner.cancelled) return { status: 'stopped' };
+            if (runner.submissionStarted) return { status: 'already-submitting' };
+            if (runner.prepared !== total || runner.submitQueue.length !== total) {
+              return { status: 'not-ready', prepared: runner.prepared, total };
+            }
 
-            runner.submitTimer = setTimeout(() => {
-              runner.submitTimer = null;
-              if (runner.cancelled) return;
-
-              const task = runner.submitQueue.shift();
-              if (!task || task.done) {
-                scheduleNextSubmit();
-                return;
-              }
-              runner.submitInFlight = true;
-              submitFilledTask(task);
-            }, submitDelayMilliseconds);
-          }
+            runner.submissionStarted = true;
+            const preparedTasks = runner.submitQueue.splice(0);
+            notify({
+              type: 'submittingAll',
+              completed: 0,
+              succeeded: 0,
+              failed: 0,
+              active: runner.active,
+              total
+            });
+            preparedTasks.forEach(submitFilledTask);
+            return { status: 'submitting', total: preparedTasks.length };
+          };
 
           const handleFrameLoad = task => {
             if (task.done || runner.cancelled) return;
@@ -603,18 +583,22 @@ enum AutomationScript {
 
             task.phase = 'queued-for-submit';
             runner.submitQueue.push(task);
+            runner.prepared += 1;
             notify({
-              type: 'queued',
-              completed: runner.processed,
-              succeeded: runner.succeeded,
-              failed: runner.failed,
+              type: 'prepared',
+              prepared: runner.prepared,
               active: runner.active,
               total,
-              presetName: task.name,
-              queued: runner.submitQueue.length,
-              delaySeconds: submitDelayMilliseconds / 1000
+              presetName: task.name
             });
-            scheduleNextSubmit();
+            if (runner.prepared === total) {
+              notify({
+                type: 'readyToSubmit',
+                prepared: runner.prepared,
+                active: runner.active,
+                total
+              });
+            }
           };
 
           const workerURL = (() => {
@@ -647,21 +631,13 @@ enum AutomationScript {
             host.appendChild(frame);
           };
 
-          function pump() {
-            if (runner.cancelled) return;
-            while (runner.active < concurrency && runner.nextIndex < total) {
-              startTask(config.tasks[runner.nextIndex]);
-              runner.nextIndex += 1;
-            }
-          }
-
           if (!total) {
             notify({ type: 'fatal', message: '没有可用的测试预设。', total: 0 });
             runner.cancel(false);
             return JSON.stringify({ status: 'empty' });
           }
 
-          pump();
+          config.tasks.forEach(startTask);
           notify({
             type: 'started',
             completed: 0,
@@ -670,7 +646,24 @@ enum AutomationScript {
             active: runner.active,
             total
           });
-          return JSON.stringify({ status: 'started', total, concurrency });
+          return JSON.stringify({ status: 'started', total });
+        })()
+        """#
+    }
+
+    static func submitPreparedParallel(runID: String) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: [runID]),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return #"""
+        (() => {
+          const requestedRunID = \#(json)[0];
+          const runner = window.__wjxParallelTest;
+          if (!runner || runner.runID !== requestedRunID || typeof runner.submitAll !== 'function') {
+            return JSON.stringify({ status: 'unavailable' });
+          }
+          return JSON.stringify(runner.submitAll());
         })()
         """#
     }
@@ -684,7 +677,7 @@ enum AutomationScript {
         (() => {
           const requestedRunID = \#(json)[0];
           const runner = window.__wjxParallelTest;
-          if (runner && typeof runner.cancel === 'function') {
+          if (runner && runner.runID === requestedRunID && typeof runner.cancel === 'function') {
             runner.cancel(false);
             return JSON.stringify({ status: 'cancelled', runID: requestedRunID });
           }

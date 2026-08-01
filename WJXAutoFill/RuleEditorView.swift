@@ -96,7 +96,7 @@ struct RuleEditorView: View {
                 }
 
                 Toggle(isOn: $store.autoSubmitAfterFill) {
-                    Label("填写完成后自动提交", systemImage: "paperplane")
+                    Label("单组填写后自动提交", systemImage: "paperplane")
                 }
 
                 submitDelayEditor
@@ -234,8 +234,6 @@ struct RuleEditorView: View {
             )
             .tint(store.isParallelReady ? .green : .orange)
 
-            Divider()
-            submitDelayEditor
         }
         .padding(14)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
@@ -347,7 +345,7 @@ struct RuleEditorView: View {
 
     private var submitDelayEditor: some View {
         HStack(spacing: 9) {
-            Label("提交间隔", systemImage: "timer")
+            Label("单组提交等待", systemImage: "timer")
                 .font(.subheadline)
             Spacer()
             TextField("0", value: submitDelayBinding, format: .number)
@@ -359,7 +357,7 @@ struct RuleEditorView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Stepper(
-                "提交间隔",
+                "单组提交等待",
                 value: submitDelayBinding,
                 in: 0...RuleStore.maximumSubmitDelaySeconds
             )
