@@ -1,0 +1,11 @@
+.DS_Store
+README.md
+DerivedData/
+build/
+dist/
+*.ipa
+*.xcarchive
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside

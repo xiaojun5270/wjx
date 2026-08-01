@@ -1,0 +1,76 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build unsigned device app
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build/Release-iphoneos
+          xcodebuild \
+            -project WJXAutoFill.xcodeproj \
+            -target WJXAutoFill \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            build | tee build/xcodebuild.log
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$PWD/build/Release-iphoneos/WJXAutoFill.app"
+          test -d "$APP_PATH"
+          PACKAGE_DIR="$RUNNER_TEMP/WJXAutoFill-package"
+          mkdir -p "$PACKAGE_DIR/Payload"
+          ditto "$APP_PATH" "$PACKAGE_DIR/Payload/WJXAutoFill.app"
+          cd "$PACKAGE_DIR"
+          zip -qry "$GITHUB_WORKSPACE/WJXAutoFill-unsigned.ipa" Payload
+          shasum -a 256 "$GITHUB_WORKSPACE/WJXAutoFill-unsigned.ipa" \
+            | tee "$GITHUB_WORKSPACE/WJXAutoFill-unsigned.ipa.sha256"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WJXAutoFill-unsigned-${{ github.run_number }}
+          path: |
+            WJXAutoFill-unsigned.ipa
+            WJXAutoFill-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish prerelease asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "unsigned-${GITHUB_RUN_NUMBER}" \
+            WJXAutoFill-unsigned.ipa \
+            WJXAutoFill-unsigned.ipa.sha256 \
+            --title "Unsigned IPA build ${GITHUB_RUN_NUMBER}" \
+            --notes "Unsigned test build from commit ${GITHUB_SHA}. It is not signed and cannot be installed on a normal iPhone without a separate signing or sideloading workflow." \
+            --prerelease \
+            --target "$GITHUB_SHA"
