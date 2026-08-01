@@ -21,6 +21,7 @@ struct RuleEditorView: View {
     @Binding var autoFillOnLoad: Bool
     @Binding var autoSubmitAfterFill: Bool
     @Binding var submitDelaySeconds: Int
+    let isPresetSelectionLocked: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var page: Page = .survey
     @State private var showingClearConfirmation = false
@@ -108,7 +109,11 @@ struct RuleEditorView: View {
             }
 
             Section("当前单次预设") {
-                presetPicker
+                if isPresetSelectionLocked {
+                    lockedPresetLabel
+                } else {
+                    presetPicker
+                }
 
                 if let preset = selectedPreset {
                     HStack {
@@ -127,28 +132,32 @@ struct RuleEditorView: View {
     private var presetEditor: some View {
         Form {
             Section {
-                HStack(spacing: 12) {
-                    Button {
-                        moveSelection(by: -1)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .frame(width: 28, height: 28)
-                    }
-                    .disabled(selectedIndex == 0)
-                    .help("上一个预设")
+                if isPresetSelectionLocked {
+                    lockedPresetLabel
+                } else {
+                    HStack(spacing: 12) {
+                        Button {
+                            moveSelection(by: -1)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .frame(width: 28, height: 28)
+                        }
+                        .disabled(selectedIndex == 0)
+                        .help("上一个预设")
 
-                    Spacer()
-                    presetPicker
-                    Spacer()
+                        Spacer()
+                        presetPicker
+                        Spacer()
 
-                    Button {
-                        moveSelection(by: 1)
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .frame(width: 28, height: 28)
+                        Button {
+                            moveSelection(by: 1)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .frame(width: 28, height: 28)
+                        }
+                        .disabled(selectedIndex >= store.presets.count - 1)
+                        .help("下一个预设")
                     }
-                    .disabled(selectedIndex >= store.presets.count - 1)
-                    .help("下一个预设")
                 }
             }
 
@@ -268,15 +277,24 @@ struct RuleEditorView: View {
 
                 Spacer()
 
-                Button {
-                    selectedPresetID = preset.id
-                } label: {
+                if isPresetSelectionLocked {
                     Image(systemName: selectedPresetID == preset.id ? "checkmark.circle.fill" : "circle")
                         .frame(width: 28, height: 28)
+                        .foregroundStyle(selectedPresetID == preset.id ? Color.green : Color.secondary)
+                        .accessibilityLabel(
+                            selectedPresetID == preset.id ? "当前页面对应预设" : "其他页面预设"
+                        )
+                } else {
+                    Button {
+                        selectedPresetID = preset.id
+                    } label: {
+                        Image(systemName: selectedPresetID == preset.id ? "checkmark.circle.fill" : "circle")
+                            .frame(width: 28, height: 28)
+                    }
+                    .foregroundStyle(selectedPresetID == preset.id ? Color.green : Color.secondary)
+                    .accessibilityLabel("设为单次填写预设")
+                    .help("设为单次填写预设")
                 }
-                .foregroundStyle(selectedPresetID == preset.id ? Color.green : Color.secondary)
-                .accessibilityLabel("设为单次填写预设")
-                .help("设为单次填写预设")
 
                 Button(role: .destructive) {
                     presetPendingClear = preset.id
@@ -390,6 +408,17 @@ struct RuleEditorView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var lockedPresetLabel: some View {
+        HStack(spacing: 8) {
+            Label(selectedPreset?.name ?? "对应预设", systemImage: "lock.fill")
+                .font(.subheadline.weight(.semibold))
+            Spacer()
+            Text("与页面编号对应")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

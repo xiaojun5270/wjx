@@ -4,8 +4,8 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var store: RuleStore
     @StateObject private var workspace: SurveyWorkspace
-    @State private var showingCompactSidebar = false
     @State private var pagePendingClose: UUID?
+    @State private var workspaceNotice: UserNotice?
 
     init() {
         let store = RuleStore()
@@ -14,6 +14,7 @@ struct ContentView: View {
             wrappedValue: SurveyWorkspace(
                 defaultURLString: store.surveyURLString,
                 defaultPresetID: store.selectedPresetID,
+                presetIDs: store.presets.map(\.id),
                 autoFillOnLoad: store.autoFillOnLoad,
                 autoSubmitAfterFill: store.autoSubmitAfterFill,
                 submitDelaySeconds: store.submitDelaySeconds
@@ -23,35 +24,15 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let usesPersistentSidebar = proxy.size.width >= 700
+            let isCompact = proxy.size.width < 700
+            let compactWidth = min(max(proxy.size.width * 0.23, 88), 104)
 
-            ZStack(alignment: .leading) {
-                HStack(spacing: 0) {
-                    if usesPersistentSidebar {
-                        pageSidebar(isCompact: false)
-                            .frame(width: 250)
-                        Divider()
-                    }
-
-                    pageStack(showsSidebarButton: !usesPersistentSidebar)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-
-                if !usesPersistentSidebar, showingCompactSidebar {
-                    Color.black.opacity(0.24)
-                        .ignoresSafeArea()
-                        .onTapGesture { showingCompactSidebar = false }
-
-                    pageSidebar(isCompact: true)
-                        .frame(width: min(proxy.size.width * 0.82, 310))
-                        .background(Color(uiColor: .systemGroupedBackground))
-                        .transition(.move(edge: .leading))
-                        .shadow(color: .black.opacity(0.18), radius: 18, x: 8)
-                }
-            }
-            .animation(.easeInOut(duration: 0.2), value: showingCompactSidebar)
-            .onChange(of: usesPersistentSidebar) { isPersistent in
-                if isPersistent { showingCompactSidebar = false }
+            HStack(spacing: 0) {
+                pageSidebar(isCompact: isCompact)
+                    .frame(width: isCompact ? compactWidth : 210)
+                Divider()
+                pageStack()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .confirmationDialog(
@@ -71,17 +52,22 @@ struct ContentView: View {
         } message: {
             Text("该页面的定时、填写和后台任务将停止。其他页面不受影响。")
         }
+        .alert(item: $workspaceNotice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("知道了"))
+            )
+        }
     }
 
-    private func pageStack(showsSidebarButton: Bool) -> some View {
+    private func pageStack() -> some View {
         ZStack {
             ForEach(workspace.pages) { page in
                 SurveyPageView(
                     session: page,
                     store: store,
-                    isSelected: workspace.selectedPageID == page.id,
-                    showsSidebarButton: showsSidebarButton,
-                    onShowSidebar: { showingCompactSidebar = true }
+                    isSelected: workspace.selectedPageID == page.id
                 )
                 .opacity(workspace.selectedPageID == page.id ? 1 : 0)
                 .allowsHitTesting(workspace.selectedPageID == page.id)
@@ -93,32 +79,49 @@ struct ContentView: View {
 
     private func pageSidebar(isCompact: Bool) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("页面")
-                    .font(.title3.weight(.semibold))
-                Spacer()
+            HStack(spacing: isCompact ? 4 : 8) {
+                if !isCompact {
+                    Text("页面")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                } else {
+                    Spacer(minLength: 0)
+                }
+
+                Button(action: reloadAllPages) {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: isCompact ? 24 : 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("刷新所有页面")
+                .help("刷新所有已打开页面")
 
                 Menu {
                     Button {
-                        addPage(copyCurrent: false, closesSidebar: isCompact)
+                        addPage(copyCurrent: false)
                     } label: {
                         Label("新建页面", systemImage: "plus")
                     }
 
                     Button {
-                        addPage(copyCurrent: true, closesSidebar: isCompact)
+                        addPage(copyCurrent: true)
                     } label: {
-                        Label("复制当前页面", systemImage: "doc.on.doc")
+                        Label("复制当前配置", systemImage: "doc.on.doc")
                     }
                 } label: {
                     Image(systemName: "plus")
-                        .frame(width: 32, height: 32)
+                        .frame(width: isCompact ? 24 : 28, height: 28)
                 }
+                .buttonStyle(.plain)
                 .disabled(!workspace.canAddPage)
                 .help("添加页面")
+
+                if isCompact {
+                    Spacer(minLength: 0)
+                }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
+            .padding(.horizontal, isCompact ? 8 : 12)
+            .padding(.vertical, 9)
 
             Divider()
 
@@ -127,17 +130,18 @@ struct ContentView: View {
                     ForEach(workspace.pages) { page in
                         SurveyPageSidebarRow(
                             page: page,
+                            presetName: presetName(for: page),
+                            isCompact: isCompact,
                             isSelected: workspace.selectedPageID == page.id,
                             canClose: workspace.pages.count > 1,
                             onSelect: {
                                 workspace.selectedPageID = page.id
-                                if isCompact { showingCompactSidebar = false }
                             },
                             onClose: { pagePendingClose = page.id }
                         )
                     }
                 }
-                .padding(8)
+                .padding(isCompact ? 5 : 7)
             }
 
             Divider()
@@ -145,35 +149,76 @@ struct ContentView: View {
                 Image(systemName: "rectangle.stack")
                 Text("\(workspace.pages.count) / \(SurveyWorkspace.maximumPageCount)")
                     .font(.caption.monospacedDigit())
-                Spacer()
+                if !isCompact { Spacer() }
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: isCompact ? .center : .leading)
+            .padding(.horizontal, isCompact ? 6 : 12)
+            .padding(.vertical, 8)
         }
         .frame(maxHeight: .infinity)
         .background(Color(uiColor: .systemGroupedBackground))
     }
 
-    private func addPage(copyCurrent: Bool, closesSidebar: Bool) {
+    private func addPage(copyCurrent: Bool) {
+        let presetIDs = store.presets.map(\.id)
         if copyCurrent {
-            workspace.duplicateSelectedPage()
+            workspace.duplicateSelectedPage(presetIDs: presetIDs)
         } else {
             workspace.addPage(
                 defaultURLString: store.surveyURLString,
                 defaultPresetID: store.selectedPresetID,
+                presetIDs: presetIDs,
                 autoFillOnLoad: store.autoFillOnLoad,
                 autoSubmitAfterFill: store.autoSubmitAfterFill,
                 submitDelaySeconds: store.submitDelaySeconds
             )
         }
-        if closesSidebar { showingCompactSidebar = false }
+    }
+
+    private func reloadAllPages() {
+        let busyPages = workspace.pages.filter { $0.controller.isBusy }
+        guard busyPages.isEmpty else {
+            workspaceNotice = UserNotice(
+                title: "暂时无法刷新全部",
+                message: "请先结束正在填写、提交或等待整点的页面，再刷新所有页面。"
+            )
+            return
+        }
+
+        let reloadablePages = workspace.pages.filter { $0.surveyURL != nil }
+        guard !reloadablePages.isEmpty else {
+            workspaceNotice = UserNotice(
+                title: "没有可刷新页面",
+                message: "请先为页面设置有效的问卷地址。"
+            )
+            return
+        }
+
+        let reopenedCount = reloadablePages.reduce(into: 0) { count, page in
+            guard let url = page.surveyURL,
+                  page.controller.reopenSurvey(url) else { return }
+            count += 1
+        }
+
+        if reopenedCount != workspace.pages.count {
+            workspaceNotice = UserNotice(
+                title: "部分页面已刷新",
+                message: "已刷新 \(reopenedCount) 个页面；尚未加载或地址无效的页面已跳过。"
+            )
+        }
+    }
+
+    private func presetName(for page: SurveyPageSession) -> String {
+        store.presets.first { $0.id == page.selectedPresetID }?.name ?? "未选预设"
     }
 }
 
 private struct SurveyPageSidebarRow: View {
     @ObservedObject var page: SurveyPageSession
     @ObservedObject private var controller: SurveyWebController
+    let presetName: String
+    let isCompact: Bool
     let isSelected: Bool
     let canClose: Bool
     let onSelect: () -> Void
@@ -181,6 +226,8 @@ private struct SurveyPageSidebarRow: View {
 
     init(
         page: SurveyPageSession,
+        presetName: String,
+        isCompact: Bool,
         isSelected: Bool,
         canClose: Bool,
         onSelect: @escaping () -> Void,
@@ -188,6 +235,8 @@ private struct SurveyPageSidebarRow: View {
     ) {
         _page = ObservedObject(wrappedValue: page)
         _controller = ObservedObject(wrappedValue: page.controller)
+        self.presetName = presetName
+        self.isCompact = isCompact
         self.isSelected = isSelected
         self.canClose = canClose
         self.onSelect = onSelect
@@ -195,28 +244,28 @@ private struct SurveyPageSidebarRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: isCompact ? 4 : 9) {
             Circle()
                 .fill(statusColor)
-                .frame(width: 8, height: 8)
+                .frame(width: 7, height: 7)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(page.title)
-                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                Text(isCompact ? "页 \(page.pageNumber)" : page.title)
+                    .font((isCompact ? Font.caption : Font.subheadline).weight(isSelected ? .semibold : .regular))
                     .lineLimit(1)
-                Text(page.surveyURL?.host ?? "地址未设置")
-                    .font(.caption)
+                Text(isCompact ? presetName : "\(presetName) · \(page.surveyURL?.host ?? "地址未设置")")
+                    .font(isCompact ? .caption2 : .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
-            Spacer(minLength: 4)
+            Spacer(minLength: isCompact ? 1 : 4)
 
             if canClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 28, height: 28)
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: isCompact ? 18 : 26, height: isCompact ? 24 : 28)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -224,8 +273,8 @@ private struct SurveyPageSidebarRow: View {
                 .help("关闭页面")
             }
         }
-        .padding(.horizontal, 10)
-        .frame(minHeight: 52)
+        .padding(.horizontal, isCompact ? 4 : 9)
+        .frame(minHeight: isCompact ? 46 : 50)
         .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
@@ -264,8 +313,6 @@ private struct SurveyPageView: View {
     @ObservedObject var store: RuleStore
     @ObservedObject private var webController: SurveyWebController
     let isSelected: Bool
-    let showsSidebarButton: Bool
-    let onShowSidebar: () -> Void
     @State private var showingRules = false
     @State private var showingLogs = false
     @State private var showingConfirmation = false
@@ -274,16 +321,12 @@ private struct SurveyPageView: View {
     init(
         session: SurveyPageSession,
         store: RuleStore,
-        isSelected: Bool,
-        showsSidebarButton: Bool,
-        onShowSidebar: @escaping () -> Void
+        isSelected: Bool
     ) {
         _session = ObservedObject(wrappedValue: session)
         _store = ObservedObject(wrappedValue: store)
         _webController = ObservedObject(wrappedValue: session.controller)
         self.isSelected = isSelected
-        self.showsSidebarButton = showsSidebarButton
-        self.onShowSidebar = onShowSidebar
     }
 
     var body: some View {
@@ -325,7 +368,8 @@ private struct SurveyPageView: View {
                     selectedPresetID: selectedPresetIDBinding,
                     autoFillOnLoad: autoFillOnLoadBinding,
                     autoSubmitAfterFill: autoSubmitAfterFillBinding,
-                    submitDelaySeconds: submitDelaySecondsBinding
+                    submitDelaySeconds: submitDelaySecondsBinding,
+                    isPresetSelectionLocked: true
                 )
                     .presentationDetents([.large])
             }
@@ -363,13 +407,6 @@ private struct SurveyPageView: View {
     @ToolbarContentBuilder
     private var browserToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .navigationBarLeading) {
-            if showsSidebarButton {
-                Button(action: onShowSidebar) {
-                    Image(systemName: "sidebar.left")
-                }
-                .help("页面菜单")
-            }
-
             Button {
                 webController.goBack()
             } label: {
@@ -476,31 +513,21 @@ private struct SurveyPageView: View {
 
     private var presetAndLogRow: some View {
         HStack(spacing: 10) {
-            Menu {
-                Picker("当前预设", selection: selectedPresetIDBinding) {
-                    ForEach(store.presets) { preset in
-                        Label(
-                            preset.name,
-                            systemImage: preset.isQueueReady ? "checkmark.circle.fill" : "circle"
-                        )
-                        .tag(preset.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "person.text.rectangle")
-                    Text(selectedPreset?.name ?? "选择预设")
-                        .font(.subheadline.weight(.medium))
-                    Text("\(selectedPreset?.completedFieldCount ?? 0)/3")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .foregroundStyle(.primary)
+            HStack(spacing: 7) {
+                Image(systemName: "person.text.rectangle")
+                Text(selectedPreset?.name ?? "对应预设")
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                Text("\(selectedPreset?.completedFieldCount ?? 0)/3")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Image(systemName: "lock.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            .disabled(webController.isBusy)
+            .foregroundStyle(.primary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(selectedPreset?.name ?? "对应预设")，与页面编号固定对应")
 
             Spacer(minLength: 4)
 
@@ -784,10 +811,7 @@ private struct SurveyPageView: View {
     private var selectedPresetIDBinding: Binding<UUID> {
         Binding(
             get: { session.selectedPresetID },
-            set: {
-                session.selectedPresetID = $0
-                store.selectedPresetID = $0
-            }
+            set: { _ in }
         )
     }
 

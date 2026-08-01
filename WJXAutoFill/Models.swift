@@ -386,9 +386,10 @@ final class RuleStore: ObservableObject {
 
 final class SurveyPageSession: ObservableObject, Identifiable {
     let id: UUID
+    let pageNumber: Int
     @Published var title: String
     @Published var surveyURLString: String
-    @Published var selectedPresetID: UUID
+    let selectedPresetID: UUID
     @Published var autoFillOnLoad: Bool
     @Published var autoSubmitAfterFill: Bool
     @Published var submitDelaySeconds: Int
@@ -396,6 +397,7 @@ final class SurveyPageSession: ObservableObject, Identifiable {
 
     init(
         id: UUID = UUID(),
+        pageNumber: Int,
         title: String,
         surveyURLString: String,
         selectedPresetID: UUID,
@@ -405,6 +407,7 @@ final class SurveyPageSession: ObservableObject, Identifiable {
         controller: SurveyWebController = SurveyWebController()
     ) {
         self.id = id
+        self.pageNumber = pageNumber
         self.title = title
         self.surveyURLString = surveyURLString
         self.selectedPresetID = selectedPresetID
@@ -428,14 +431,20 @@ final class SurveyWorkspace: ObservableObject {
     init(
         defaultURLString: String,
         defaultPresetID: UUID,
+        presetIDs: [UUID],
         autoFillOnLoad: Bool,
         autoSubmitAfterFill: Bool,
         submitDelaySeconds: Int
     ) {
         let firstPage = SurveyPageSession(
+            pageNumber: 1,
             title: "页面 1",
             surveyURLString: defaultURLString,
-            selectedPresetID: defaultPresetID,
+            selectedPresetID: Self.correspondingPresetID(
+                for: 1,
+                presetIDs: presetIDs,
+                fallback: defaultPresetID
+            ),
             autoFillOnLoad: autoFillOnLoad,
             autoSubmitAfterFill: autoSubmitAfterFill,
             submitDelaySeconds: submitDelaySeconds
@@ -457,36 +466,51 @@ final class SurveyWorkspace: ObservableObject {
     func addPage(
         defaultURLString: String,
         defaultPresetID: UUID,
+        presetIDs: [UUID],
         autoFillOnLoad: Bool,
         autoSubmitAfterFill: Bool,
         submitDelaySeconds: Int
     ) -> SurveyPageSession? {
-        guard canAddPage else { return nil }
+        guard canAddPage, let pageNumber = nextPageNumber() else { return nil }
         let page = SurveyPageSession(
-            title: nextPageTitle(),
+            pageNumber: pageNumber,
+            title: "页面 \(pageNumber)",
             surveyURLString: defaultURLString,
-            selectedPresetID: defaultPresetID,
+            selectedPresetID: Self.correspondingPresetID(
+                for: pageNumber,
+                presetIDs: presetIDs,
+                fallback: defaultPresetID
+            ),
             autoFillOnLoad: autoFillOnLoad,
             autoSubmitAfterFill: autoSubmitAfterFill,
             submitDelaySeconds: submitDelaySeconds
         )
         pages.append(page)
+        pages.sort { $0.pageNumber < $1.pageNumber }
         selectedPageID = page.id
         return page
     }
 
     @discardableResult
-    func duplicateSelectedPage() -> SurveyPageSession? {
-        guard canAddPage, let selectedPage else { return nil }
+    func duplicateSelectedPage(presetIDs: [UUID]) -> SurveyPageSession? {
+        guard canAddPage,
+              let selectedPage,
+              let pageNumber = nextPageNumber() else { return nil }
         let page = SurveyPageSession(
-            title: nextPageTitle(),
+            pageNumber: pageNumber,
+            title: "页面 \(pageNumber)",
             surveyURLString: selectedPage.surveyURLString,
-            selectedPresetID: selectedPage.selectedPresetID,
+            selectedPresetID: Self.correspondingPresetID(
+                for: pageNumber,
+                presetIDs: presetIDs,
+                fallback: selectedPage.selectedPresetID
+            ),
             autoFillOnLoad: selectedPage.autoFillOnLoad,
             autoSubmitAfterFill: selectedPage.autoSubmitAfterFill,
             submitDelaySeconds: selectedPage.submitDelaySeconds
         )
         pages.append(page)
+        pages.sort { $0.pageNumber < $1.pageNumber }
         selectedPageID = page.id
         return page
     }
@@ -505,13 +529,22 @@ final class SurveyWorkspace: ObservableObject {
         }
     }
 
-    private func nextPageTitle() -> String {
+    private func nextPageNumber() -> Int? {
         for number in 1...Self.maximumPageCount {
-            let candidate = "页面 \(number)"
-            if !pages.contains(where: { $0.title == candidate }) {
-                return candidate
+            if !pages.contains(where: { $0.pageNumber == number }) {
+                return number
             }
         }
-        return "新页面"
+        return nil
+    }
+
+    private static func correspondingPresetID(
+        for pageNumber: Int,
+        presetIDs: [UUID],
+        fallback: UUID
+    ) -> UUID {
+        let index = pageNumber - 1
+        guard presetIDs.indices.contains(index) else { return fallback }
+        return presetIDs[index]
     }
 }

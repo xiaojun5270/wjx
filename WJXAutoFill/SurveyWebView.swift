@@ -105,6 +105,20 @@ final class SurveyWebController: ObservableObject {
         webView?.reload()
     }
 
+    @discardableResult
+    func reopenSurvey(_ url: URL) -> Bool {
+        guard !isBusy, let webView else { return false }
+        prepareForNewSurvey(url)
+        appendLog("通过刷新全部重新打开问卷。", category: .page)
+        webView.load(
+            URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalAndRemoteCacheData
+            )
+        )
+        return true
+    }
+
     func goBack() {
         guard !isBusy,
               let webView, webView.canGoBack else { return }
