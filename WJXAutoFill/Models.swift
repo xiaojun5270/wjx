@@ -20,6 +20,12 @@ struct SubmissionPreset: Identifiable, Codable, Hashable {
             !$0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
+
+    var isQueueReady: Bool {
+        ["姓名", "工号"].allSatisfy { keyword in
+            usableRules.contains { $0.questionContains.contains(keyword) }
+        }
+    }
 }
 
 struct DetectedQuestion: Identifiable, Hashable {
@@ -51,6 +57,10 @@ struct UserNotice: Identifiable {
 }
 
 final class RuleStore: ObservableObject {
+    private static let defaultEmailDomain = "example.com"
+    private static let randomEmailPrefix = "{{random_email:"
+    private static let randomEmailSuffix = "}}"
+
     private enum Key {
         static let rules = "fillRules.v1"
         static let presets = "submissionPresets.v2"
@@ -99,28 +109,32 @@ final class RuleStore: ObservableObject {
             queueDelaySeconds = max(2, min(defaults.double(forKey: Key.queueDelay), 30))
         }
 
-        let loadedPresets: [SubmissionPreset]
+        let rawPresets: [SubmissionPreset]
         if let data = defaults.data(forKey: Key.presets),
            let decoded = try? JSONDecoder().decode([SubmissionPreset].self, from: data),
            !decoded.isEmpty {
-            loadedPresets = decoded
+            rawPresets = decoded
         } else if let oldData = defaults.data(forKey: Key.rules),
                   let oldRules = try? JSONDecoder().decode([FillRule].self, from: oldData),
                   !oldRules.isEmpty {
-            loadedPresets = [SubmissionPreset(name: "预设 1", rules: oldRules)]
+            rawPresets = [SubmissionPreset(name: "预设 1", rules: oldRules)]
         } else {
-            loadedPresets = [
+            rawPresets = [
                 SubmissionPreset(
                     name: "预设 1",
                     rules: [
                         FillRule(questionContains: "姓名", answer: "", isEnabled: false),
                         FillRule(questionContains: "工号", answer: "", isEnabled: false),
-                        FillRule(questionContains: "部门", answer: "", isEnabled: false),
-                        FillRule(questionContains: "手机", answer: "", isEnabled: false)
+                        FillRule(
+                            questionContains: "邮箱",
+                            answer: Self.randomEmailToken(domain: Self.defaultEmailDomain),
+                            isEnabled: false
+                        )
                     ]
                 )
             ]
         }
+        let loadedPresets = rawPresets.map(Self.normalizedPreset)
         presets = loadedPresets
 
         if let storedValue = defaults.string(forKey: Key.selectedPresetID),
@@ -152,7 +166,7 @@ final class RuleStore: ObservableObject {
     }
 
     var queuePresets: [SubmissionPreset] {
-        Array(presets.filter { !$0.usableRules.isEmpty }.prefix(20))
+        Array(presets.filter { $0.isQueueReady }.prefix(20))
     }
 
     func addPreset(copyCurrent: Bool) {
@@ -166,7 +180,7 @@ final class RuleStore: ObservableObject {
                 )
             }
             : []
-        let preset = SubmissionPreset(name: "预设 \(number)", rules: rules)
+        let preset = Self.normalizedPreset(SubmissionPreset(name: "预设 \(number)", rules: rules))
         presets.append(preset)
         selectedPresetID = preset.id
     }
@@ -182,6 +196,53 @@ final class RuleStore: ObservableObject {
         presets[index].rules.append(FillRule(questionContains: question, answer: answer))
     }
 
+    func fixedAnswer(for keyword: String) -> String {
+        guard let presetIndex = selectedPresetIndex,
+              let ruleIndex = fixedRuleIndex(keyword: keyword, presetIndex: presetIndex) else {
+            return ""
+        }
+        return presets[presetIndex].rules[ruleIndex].answer
+    }
+
+    func setFixedAnswer(_ value: String, for keyword: String) {
+        guard let presetIndex = selectedPresetIndex else { return }
+        let ruleIndex = ensureFixedRule(keyword: keyword, presetIndex: presetIndex)
+        presets[presetIndex].rules[ruleIndex].answer = value
+        presets[presetIndex].rules[ruleIndex].isEnabled = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var randomEmailEnabled: Bool {
+        guard let presetIndex = selectedPresetIndex,
+              let ruleIndex = fixedRuleIndex(keyword: "邮箱", presetIndex: presetIndex) else {
+            return false
+        }
+        return presets[presetIndex].rules[ruleIndex].isEnabled
+    }
+
+    func setRandomEmailEnabled(_ enabled: Bool) {
+        guard let presetIndex = selectedPresetIndex else { return }
+        let ruleIndex = ensureFixedRule(keyword: "邮箱", presetIndex: presetIndex)
+        let currentDomain = Self.randomEmailDomain(from: presets[presetIndex].rules[ruleIndex].answer)
+            ?? Self.defaultEmailDomain
+        presets[presetIndex].rules[ruleIndex].answer = Self.randomEmailToken(domain: currentDomain)
+        presets[presetIndex].rules[ruleIndex].isEnabled = enabled
+    }
+
+    var randomEmailDomain: String {
+        guard let presetIndex = selectedPresetIndex,
+              let ruleIndex = fixedRuleIndex(keyword: "邮箱", presetIndex: presetIndex) else {
+            return Self.defaultEmailDomain
+        }
+        return Self.randomEmailDomain(from: presets[presetIndex].rules[ruleIndex].answer)
+            ?? Self.defaultEmailDomain
+    }
+
+    func setRandomEmailDomain(_ domain: String) {
+        guard let presetIndex = selectedPresetIndex else { return }
+        let ruleIndex = ensureFixedRule(keyword: "邮箱", presetIndex: presetIndex)
+        presets[presetIndex].rules[ruleIndex].answer = Self.randomEmailToken(domain: domain)
+    }
+
     func deleteRules(at offsets: IndexSet) {
         guard let presetIndex = selectedPresetIndex else { return }
         for offset in offsets.sorted(by: >) {
@@ -192,5 +253,79 @@ final class RuleStore: ObservableObject {
     private func persistPresets() {
         guard let data = try? JSONEncoder().encode(presets) else { return }
         defaults.set(data, forKey: Key.presets)
+    }
+
+    private func fixedRuleIndex(keyword: String, presetIndex: Int) -> Int? {
+        presets[presetIndex].rules.firstIndex {
+            $0.questionContains.trimmingCharacters(in: .whitespacesAndNewlines).contains(keyword)
+        }
+    }
+
+    private func ensureFixedRule(keyword: String, presetIndex: Int) -> Int {
+        if let existing = fixedRuleIndex(keyword: keyword, presetIndex: presetIndex) {
+            return existing
+        }
+        let answer = keyword == "邮箱"
+            ? Self.randomEmailToken(domain: Self.defaultEmailDomain)
+            : ""
+        presets[presetIndex].rules.append(
+            FillRule(questionContains: keyword, answer: answer, isEnabled: false)
+        )
+        return presets[presetIndex].rules.count - 1
+    }
+
+    private static func normalizedPreset(_ preset: SubmissionPreset) -> SubmissionPreset {
+        var result = preset
+        result.rules.removeAll {
+            !$0.isEnabled &&
+            $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            ["部门", "手机"].contains($0.questionContains.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        for keyword in ["姓名", "工号"] where !result.rules.contains(where: { $0.questionContains.contains(keyword) }) {
+            result.rules.append(FillRule(questionContains: keyword, answer: "", isEnabled: false))
+        }
+
+        if let emailIndex = result.rules.firstIndex(where: { $0.questionContains.contains("邮箱") }) {
+            let oldAnswer = result.rules[emailIndex].answer
+            let legacyDomain: String?
+            if let atIndex = oldAnswer.lastIndex(of: "@") {
+                legacyDomain = String(oldAnswer[oldAnswer.index(after: atIndex)...])
+            } else {
+                legacyDomain = nil
+            }
+            let domain = randomEmailDomain(from: oldAnswer)
+                ?? legacyDomain
+                ?? defaultEmailDomain
+            result.rules[emailIndex].answer = randomEmailToken(domain: domain)
+        } else {
+            result.rules.append(
+                FillRule(
+                    questionContains: "邮箱",
+                    answer: randomEmailToken(domain: defaultEmailDomain),
+                    isEnabled: false
+                )
+            )
+        }
+        return result
+    }
+
+    private static func randomEmailToken(domain: String) -> String {
+        let cleaned = domain
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "@", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        return randomEmailPrefix + (cleaned.isEmpty ? defaultEmailDomain : cleaned) + randomEmailSuffix
+    }
+
+    private static func randomEmailDomain(from answer: String) -> String? {
+        guard answer.hasPrefix(randomEmailPrefix), answer.hasSuffix(randomEmailSuffix) else {
+            return nil
+        }
+        let start = answer.index(answer.startIndex, offsetBy: randomEmailPrefix.count)
+        let end = answer.index(answer.endIndex, offsetBy: -randomEmailSuffix.count)
+        let domain = String(answer[start..<end])
+        return domain.isEmpty ? nil : domain
     }
 }

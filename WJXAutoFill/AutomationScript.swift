@@ -73,6 +73,17 @@ enum AutomationScript {
           const rules = #(json);
           const clean = value => (value || '').replace(/\s+/g, ' ').trim();
           const normalized = value => clean(value).toLocaleLowerCase('zh-CN');
+          const resolveDynamicAnswer = rawValue => {
+            const value = clean(rawValue);
+            const match = value.match(/^\{\{random_email(?::([^}]+))?\}\}$/i);
+            if (!match) return value;
+            const domain = clean(match[1] || 'example.com')
+              .replace(/^@+/, '')
+              .replace(/\s+/g, '') || 'example.com';
+            const timestamp = Date.now().toString(36);
+            const randomPart = Math.random().toString(36).slice(2, 10);
+            return `test_${timestamp}_${randomPart}@${domain}`;
+          };
           const visible = element => {
             if (!element) return false;
             const style = window.getComputedStyle(element);
@@ -112,7 +123,7 @@ enum AutomationScript {
 
           for (const rule of rules) {
             const question = normalized(rule.question);
-            const answer = clean(rule.answer);
+            const answer = resolveDynamicAnswer(rule.answer);
             if (!question || !answer) continue;
 
             const container = containers.find(candidate => normalized(candidate.innerText).includes(question));

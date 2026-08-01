@@ -52,7 +52,33 @@ struct RuleEditorView: View {
                 } header: {
                     Text("账号预设")
                 } footer: {
-                    Text("测试队列会按照这里的排列顺序执行，最多读取前 20 个含有效规则的预设。复制当前预设后，只需修改姓名、账号等不同答案。")
+                    Text("测试队列会按照这里的排列顺序执行，最多读取前 20 个已填写姓名和工号的预设。复制当前预设后，只需修改不同的姓名和工号。")
+                }
+
+                Section {
+                    TextField("姓名", text: fixedAnswerBinding(keyword: "姓名"))
+                        .textContentType(.name)
+
+                    TextField("工号", text: fixedAnswerBinding(keyword: "工号"))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Toggle("填写随机邮箱", isOn: randomEmailEnabledBinding)
+
+                    if store.randomEmailEnabled {
+                        TextField("邮箱域名，例如 example.com", text: randomEmailDomainBinding)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+
+                        Text("每次填写会生成类似 test_mabc123_xyz@example.com 的新地址。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("固定提交内容")
+                } footer: {
+                    Text("邮箱可按预设单独开启或关闭。页面没有邮箱题时，启用邮箱也不会影响姓名和工号的填写。")
                 }
 
                 Section {
@@ -75,9 +101,9 @@ struct RuleEditorView: View {
                         Label("添加规则", systemImage: "plus.circle")
                     }
                 } header: {
-                    Text("填写规则")
+                    Text("高级填写规则")
                 } footer: {
-                    Text("应用按题目文字包含关系匹配。单选填一个选项文字；多选答案、或同一题中的多个输入框，用分号分隔。")
+                    Text("上面的固定字段会同步到这里。通常无需修改；如页面题目文字不同，可在这里调整关键字。")
                 }
 
                 Section {
@@ -125,5 +151,26 @@ struct RuleEditorView: View {
                 }
             }
         }
+    }
+
+    private func fixedAnswerBinding(keyword: String) -> Binding<String> {
+        Binding(
+            get: { store.fixedAnswer(for: keyword) },
+            set: { store.setFixedAnswer($0, for: keyword) }
+        )
+    }
+
+    private var randomEmailEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { store.randomEmailEnabled },
+            set: { store.setRandomEmailEnabled($0) }
+        )
+    }
+
+    private var randomEmailDomainBinding: Binding<String> {
+        Binding(
+            get: { store.randomEmailDomain },
+            set: { store.setRandomEmailDomain($0) }
+        )
     }
 }

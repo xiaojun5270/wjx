@@ -79,7 +79,7 @@ final class SurveyWebController: ObservableObject {
             return
         }
 
-        let usablePresets = Array(presets.filter { !$0.usableRules.isEmpty }.prefix(20))
+        let usablePresets = Array(presets.filter { $0.isQueueReady }.prefix(20))
         guard usablePresets.count >= 2 else {
             notice = UserNotice(title: "预设不足", message: "连续测试至少需要两个含有效填写规则的预设。")
             return
