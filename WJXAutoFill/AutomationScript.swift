@@ -305,6 +305,141 @@ enum AutomationScript {
             runner.cancel(false);
           };
 
+          const cleanMessage = value => {
+            const holder = document.createElement('div');
+            holder.innerHTML = String(value || '');
+            return (holder.textContent || holder.innerText || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 240);
+          };
+
+          const readableFrameURL = task => {
+            try {
+              return task.frame.contentWindow?.location.href || '未知地址';
+            } catch (_) {
+              return '跨域页面';
+            }
+          };
+
+          const finishFromWJXResponse = (task, observation) => {
+            if (task.done || runner.cancelled) return;
+            task.ajaxObserved = true;
+
+            if (observation.kind === 'network-error') {
+              const status = Number(observation.httpStatus) || 0;
+              const detail = cleanMessage(observation.error || observation.statusText);
+              finishTask(
+                task,
+                false,
+                `问卷星提交请求失败（HTTP ${status || '未知'}）${detail ? `：${detail}` : ''}`
+              );
+              return;
+            }
+
+            const responseText = String(observation.responseText || '');
+            const parts = responseText.split('〒');
+            const code = (parts[0] || '').trim();
+            const message = cleanMessage(parts[1] || '');
+            const preview = cleanMessage(responseText);
+            task.wjxCode = code;
+
+            if (code === '10' || code === '11') {
+              finishTask(task, true);
+              return;
+            }
+
+            const detail = message || preview || '空响应';
+            if (/验证码|人机验证/.test(detail)) {
+              stopAll(`问卷星要求人机验证（返回码 ${code || '未知'}），后台并行测试已停止。`);
+              return;
+            }
+            finishTask(task, false, `问卷星返回码 ${code || '未知'}：${detail}`);
+          };
+
+          const installSubmitObserver = task => {
+            const frameWindow = task.frame.contentWindow;
+            if (!frameWindow) throw new Error('后台页面尚未就绪。');
+
+            task.ajaxObserved = false;
+            task.submitButtonClicked = false;
+            const submitButton = frameWindow.document.querySelector(
+              '#ctlNext, #submit_button, button[type="submit"], input[type="submit"]'
+            );
+            submitButton?.addEventListener('click', () => {
+              task.submitButtonClicked = true;
+            }, { capture: true, once: true });
+
+            const jq = frameWindow.jQuery || frameWindow.$;
+            if (!jq || typeof jq.ajax !== 'function') {
+              throw new Error('页面提交组件尚未加载。');
+            }
+
+            const originalAjax = jq.ajax;
+            jq.ajax = function(urlOrOptions, maybeOptions) {
+              const options = typeof urlOrOptions === 'string'
+                ? { ...(maybeOptions || {}), url: urlOrOptions }
+                : { ...(urlOrOptions || {}) };
+              const requestURL = String(options.url || '');
+              if (!requestURL.includes('processjq.ashx')) {
+                return originalAjax.apply(this, arguments);
+              }
+
+              const originalSuccess = options.success;
+              const originalError = options.error;
+              options.success = function(data, textStatus, xhr) {
+                try {
+                  return typeof originalSuccess === 'function'
+                    ? originalSuccess.apply(this, arguments)
+                    : undefined;
+                } finally {
+                  finishFromWJXResponse(task, {
+                    kind: 'response',
+                    responseText: typeof data === 'string' ? data : xhr?.responseText,
+                    httpStatus: xhr?.status,
+                    statusText: textStatus
+                  });
+                }
+              };
+              options.error = function(xhr, textStatus, errorThrown) {
+                try {
+                  return typeof originalError === 'function'
+                    ? originalError.apply(this, arguments)
+                    : undefined;
+                } finally {
+                  finishFromWJXResponse(task, {
+                    kind: 'network-error',
+                    responseText: xhr?.responseText,
+                    httpStatus: xhr?.status,
+                    statusText: textStatus,
+                    error: errorThrown
+                  });
+                }
+              };
+              return originalAjax.call(this, options);
+            };
+          };
+
+          const submissionDiagnostics = task => {
+            let validationMessage = '';
+            try {
+              const frameDocument = task.frame.contentWindow?.document;
+              const nodes = Array.from(frameDocument?.querySelectorAll(
+                '#ValError, #captchaTit, .errorMessage, .field.error'
+              ) || []);
+              validationMessage = cleanMessage(
+                nodes.map(node => node.innerText || node.textContent).filter(Boolean).join(' ')
+              );
+            } catch (_) {}
+            const details = [
+              `点击=${task.submitButtonClicked ? '是' : '否'}`,
+              `AJAX响应=${task.ajaxObserved ? '是' : '否'}`,
+              `页面=${readableFrameURL(task)}`
+            ];
+            if (validationMessage) details.push(`提示=${validationMessage}`);
+            return details.join('，');
+          };
+
           const inspectSubmittedPage = task => {
             let scanResult;
             try {
@@ -320,7 +455,11 @@ enum AutomationScript {
             } else if (scanResult.status === 'closed') {
               stopAll(scanResult.message || '问卷当前不可提交。');
             } else {
-              finishTask(task, false, '提交后仍停留在填写页面，可能有必填项或格式校验未通过。');
+              finishTask(
+                task,
+                false,
+                `未收到问卷星提交结果；${submissionDiagnostics(task)}`
+              );
             }
           };
 
@@ -372,6 +511,13 @@ enum AutomationScript {
               return;
             }
 
+            try {
+              installSubmitObserver(task);
+            } catch (error) {
+              finishTask(task, false, `无法监听提交结果：${error.message || error}`);
+              return;
+            }
+
             let submitResult;
             try {
               submitResult = evaluateInFrame(task, config.submitScript);
@@ -393,8 +539,20 @@ enum AutomationScript {
               if (!task.done && !runner.cancelled && task.phase === 'submitting') {
                 inspectSubmittedPage(task);
               }
-            }, 5000);
+            }, 8000);
           };
+
+          const workerURL = (() => {
+            const requested = new URL(config.surveyURL, window.location.href);
+            const currentHost = window.location.hostname.toLocaleLowerCase();
+            const requestedHost = requested.hostname.toLocaleLowerCase();
+            const isWJXHost = hostName => hostName === 'wjx.cn' || hostName.endsWith('.wjx.cn');
+            if (isWJXHost(currentHost) && isWJXHost(requestedHost)) {
+              requested.protocol = window.location.protocol;
+              requested.host = window.location.host;
+            }
+            return requested.href;
+          })();
 
           const startTask = taskConfig => {
             const frame = document.createElement('iframe');
@@ -410,7 +568,7 @@ enum AutomationScript {
             runner.frames.add(frame);
             frame.addEventListener('load', () => handleFrameLoad(task));
             frame.addEventListener('error', () => finishTask(task, false, '后台页面加载失败。'));
-            frame.src = config.surveyURL;
+            frame.src = workerURL;
             host.appendChild(frame);
           };
 

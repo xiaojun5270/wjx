@@ -9,6 +9,7 @@ struct ContentView: View {
     @StateObject private var store = RuleStore()
     @StateObject private var webController = SurveyWebController()
     @State private var showingRules = false
+    @State private var showingLogs = false
     @State private var showingConfirmation = false
     @State private var confirmationAction: ConfirmationAction = .singleSubmit
 
@@ -18,11 +19,13 @@ struct ContentView: View {
                 if let url = store.surveyURL {
                     VStack(spacing: 0) {
                         statusBar
+                        logBar
                         SurveyWebView(
                             controller: webController,
                             url: url,
                             rules: store.selectedPreset?.rules ?? [],
-                            autoFillOnLoad: store.autoFillOnLoad
+                            autoFillOnLoad: store.autoFillOnLoad,
+                            autoSubmitAfterFill: store.autoSubmitAfterFill
                         )
                     }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -46,13 +49,36 @@ struct ContentView: View {
             .navigationTitle("问卷助手")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        webController.goBack()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .disabled(
+                        !webController.canGoBack || webController.isQueueRunning ||
+                        webController.isFilling || webController.isSubmitting
+                    )
+                    .help("返回上一页")
+                }
+
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button {
+                        showingLogs = true
+                    } label: {
+                        Image(systemName: "doc.text.magnifyingglass")
+                    }
+                    .help("运行日志")
+
                     Button {
                         webController.reload()
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
-                    .disabled(store.surveyURL == nil || webController.isQueueRunning)
+                    .disabled(
+                        store.surveyURL == nil || webController.isQueueRunning ||
+                        webController.isFilling || webController.isSubmitting
+                    )
 
                     Button {
                         showingRules = true
@@ -64,6 +90,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingRules) {
                 RuleEditorView(store: store)
+            }
+            .sheet(isPresented: $showingLogs) {
+                AutomationLogView(controller: webController)
             }
             .confirmationDialog("确认操作", isPresented: $showingConfirmation, titleVisibility: .visible) {
                 switch confirmationAction {
@@ -115,6 +144,29 @@ struct ContentView: View {
         .background(statusColor.opacity(0.10))
     }
 
+    private var logBar: some View {
+        Button {
+            showingLogs = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "text.alignleft")
+                Text(webController.logs.last?.message ?? "等待运行日志")
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+            }
+            .font(.caption)
+            .foregroundStyle(logColor(webController.logs.last?.level))
+            .padding(.horizontal, 14)
+            .frame(height: 32)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(Color(uiColor: .secondarySystemBackground))
+    }
+
     private var actionBar: some View {
         VStack(spacing: 9) {
             if webController.isQueueRunning {
@@ -131,12 +183,20 @@ struct ContentView: View {
             } else {
                 HStack(spacing: 12) {
                     Button {
-                        webController.fill(rules: store.selectedPreset?.rules ?? [])
+                        if store.autoSubmitAfterFill {
+                            webController.fillAndSubmit(rules: store.selectedPreset?.rules ?? [])
+                        } else {
+                            webController.fill(rules: store.selectedPreset?.rules ?? [])
+                        }
                     } label: {
-                        Label("自动填写", systemImage: "wand.and.stars")
+                        Label(
+                            store.autoSubmitAfterFill ? "填写并提交" : "自动填写",
+                            systemImage: "wand.and.stars"
+                        )
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
+                    .disabled(webController.isFilling || webController.isSubmitting)
 
                     Button {
                         confirmationAction = .singleSubmit
@@ -227,7 +287,8 @@ struct ContentView: View {
     }
 
     private var canStartQueue: Bool {
-        guard store.isParallelReady, store.surveyURL != nil else { return false }
+        guard store.isParallelReady, store.surveyURL != nil,
+              !webController.isFilling, !webController.isSubmitting else { return false }
         switch webController.state {
         case .ready(_), .submitted(_):
             return true
@@ -236,11 +297,84 @@ struct ContentView: View {
         }
     }
 
+    private func logColor(_ level: AutomationLogLevel?) -> Color {
+        switch level {
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        case .info, .none: return .secondary
+        }
+    }
+
     private var queueProgressText: String {
         if case .running(let current, let total, let presetName) = webController.queueState {
             return "\(current)/\(total) · \(presetName)"
         }
         return "后台并行测试运行中"
+    }
+}
+
+private struct AutomationLogView: View {
+    @ObservedObject var controller: SurveyWebController
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if controller.logs.isEmpty {
+                    Text("暂无运行日志")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(controller.logs.reversed())) { entry in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: iconName(for: entry.level))
+                                .foregroundStyle(color(for: entry.level))
+                                .frame(width: 18)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.message)
+                                    .font(.subheadline)
+                                Text(entry.timestamp.formatted(date: .omitted, time: .standard))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .navigationTitle("运行日志")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    Button("清空", role: .destructive) {
+                        controller.clearLogs()
+                    }
+                    .disabled(controller.logs.isEmpty)
+                }
+            }
+        }
+    }
+
+    private func iconName(for level: AutomationLogLevel) -> String {
+        switch level {
+        case .info: return "info.circle"
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error: return "xmark.octagon.fill"
+        }
+    }
+
+    private func color(for level: AutomationLogLevel) -> Color {
+        switch level {
+        case .info: return .blue
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        }
     }
 }
 

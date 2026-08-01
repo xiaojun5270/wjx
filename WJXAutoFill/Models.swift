@@ -65,6 +65,20 @@ struct UserNotice: Identifiable {
     let message: String
 }
 
+enum AutomationLogLevel {
+    case info
+    case success
+    case warning
+    case error
+}
+
+struct AutomationLogEntry: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let level: AutomationLogLevel
+    let message: String
+}
+
 final class RuleStore: ObservableObject {
     static let presetCount = 10
 
@@ -74,6 +88,7 @@ final class RuleStore: ObservableObject {
         static let selectedPresetID = "selectedPresetID.v2"
         static let surveyURL = "surveyURL.v1"
         static let autoFill = "autoFillOnLoad.v1"
+        static let autoSubmit = "autoSubmitAfterFill.v1"
         static let parallelConcurrency = "parallelConcurrency.v2"
     }
 
@@ -95,6 +110,10 @@ final class RuleStore: ObservableObject {
         didSet { defaults.set(autoFillOnLoad, forKey: Key.autoFill) }
     }
 
+    @Published var autoSubmitAfterFill: Bool {
+        didSet { defaults.set(autoSubmitAfterFill, forKey: Key.autoSubmit) }
+    }
+
     @Published private(set) var parallelConcurrency: Int
 
     init(defaults: UserDefaults = .standard) {
@@ -106,6 +125,12 @@ final class RuleStore: ObservableObject {
             autoFillOnLoad = true
         } else {
             autoFillOnLoad = defaults.bool(forKey: Key.autoFill)
+        }
+
+        if defaults.object(forKey: Key.autoSubmit) == nil {
+            autoSubmitAfterFill = true
+        } else {
+            autoSubmitAfterFill = defaults.bool(forKey: Key.autoSubmit)
         }
 
         // 固定十组任务同时启动；使用新键，避免旧版本保存的 3/5 并发继续生效。

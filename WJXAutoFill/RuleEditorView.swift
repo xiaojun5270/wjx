@@ -8,7 +8,7 @@ struct RuleEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("问卷") {
+                Section {
                     TextField("https://www.wjx.cn/...", text: $store.surveyURLString)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
@@ -21,6 +21,11 @@ struct RuleEditorView: View {
                     }
 
                     Toggle("页面加载后自动填写", isOn: $store.autoFillOnLoad)
+                    Toggle("填写完成后自动提交", isOn: $store.autoSubmitAfterFill)
+                } header: {
+                    Text("问卷")
+                } footer: {
+                    Text("自动提交只尝试一次；如果页面要求验证码或提示格式错误，不会循环重复提交。")
                 }
 
                 Section {
