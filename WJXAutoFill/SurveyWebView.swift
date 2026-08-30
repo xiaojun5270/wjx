@@ -90,6 +90,7 @@ final class SurveyWebController: ObservableObject {
     @Published private(set) var scheduledBatchTarget: Date?
     @Published private(set) var batchScheduleRemainingSeconds = 0
     @Published private(set) var canGoBack = false
+    @Published private(set) var isAwaitingCaptchaCompletion = false
     @Published private(set) var logs: [AutomationLogEntry] = []
 
     fileprivate weak var webView: WKWebView?
@@ -98,6 +99,9 @@ final class SurveyWebController: ObservableObject {
     private var parallelRunID: String?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var hasAutoSubmittedCurrentForm = false
+    private var captchaWatchID: UUID?
+    private var captchaWatchTicks = 0
+    private var captchaResumeCount = 0
     private var pendingAutoSubmitWorkItem: DispatchWorkItem?
     private var scheduledBatch: (presets: [SubmissionPreset], surveyURL: URL)?
     private var pendingScheduledBatch: (presets: [SubmissionPreset], surveyURL: URL)?
@@ -119,6 +123,10 @@ final class SurveyWebController: ObservableObject {
 
     private static let maximumAutomaticPageRecoveryAttempts = 2
     private static let maximumComponentReadinessAttempts = 20
+    /// 人机验证交给用户手动完成，这里只负责轮询等待验证消失，不做任何绕过。
+    private static let captchaWatchInterval: TimeInterval = 1.5
+    private static let maximumCaptchaWatchTicks = 160
+    private static let maximumCaptchaResumes = 3
 
     private enum FillEvaluation {
         case success(matched: Int, filled: Int)
@@ -180,6 +188,7 @@ final class SurveyWebController: ObservableObject {
         cancelAutomaticPageRecovery()
         cancelProgrammaticLoad(stopLoading: true)
         cancelPendingAutoSubmit()
+        cancelCaptchaWatch()
         cancelScheduledBatch(logCancellation: false)
         clearPendingScheduledBatch()
         if let runID = parallelRunID,
@@ -588,7 +597,11 @@ final class SurveyWebController: ObservableObject {
                     self.isSubmitting = false
                     self.state = .captchaRequired
                     self.appendLog("\(source)暂停：页面要求人机验证。", level: .warning, category: .security)
-                    self.notice = UserNotice(title: "需要人机验证", message: "应用不会绕过验证码，请先在问卷页面中手动完成验证。")
+                    self.notice = UserNotice(
+                        title: "需要人机验证",
+                        message: "应用不会绕过验证码。请在页面中手动完成验证，完成后会自动继续提交。"
+                    )
+                    self.beginCaptchaWatch()
                 case "closed":
                     self.isSubmitting = false
                     let message = payload["message"] as? String ?? "问卷当前不可提交。"
@@ -614,6 +627,7 @@ final class SurveyWebController: ObservableObject {
         cancelProgrammaticLoad(stopLoading: true)
         stopCountdownAutomation()
         cancelPendingAutoSubmit()
+        cancelCaptchaWatch()
         resetQueueSummary()
         currentSurveyURL = url
         automaticPageRecoveryAttempts = 0
@@ -1795,8 +1809,9 @@ final class SurveyWebController: ObservableObject {
             case .captchaRequired:
                 self.notice = UserNotice(
                     title: "需要人机验证",
-                    message: "请先在问卷页面中手动完成验证。"
+                    message: "请在页面中手动完成验证，完成后会自动继续提交。"
                 )
+                self.beginCaptchaWatch()
             case .failed(let message):
                 self.notice = UserNotice(title: "提交结果检查失败", message: message)
             default:
@@ -1809,6 +1824,101 @@ final class SurveyWebController: ObservableObject {
         pendingAutoSubmitWorkItem?.cancel()
         pendingAutoSubmitWorkItem = nil
         isWaitingToSubmit = false
+    }
+
+    // MARK: - 人机验证交接
+    //
+    // 这里刻意不做任何绕过：应用只是停下来等用户在页面上亲手完成验证，
+    // 轮询发现验证已消失后，替用户把中断的那一次提交接着走完。
+
+    private func beginCaptchaWatch() {
+        guard captchaWatchID == nil else { return }
+        guard captchaResumeCount < Self.maximumCaptchaResumes else {
+            appendLog(
+                "本页已等待人工验证 \(captchaResumeCount) 次，不再自动继续，请手动提交。",
+                level: .warning,
+                category: .security
+            )
+            return
+        }
+        let watchID = UUID()
+        captchaWatchID = watchID
+        captchaWatchTicks = 0
+        isAwaitingCaptchaCompletion = true
+        appendLog("正在等待你手动完成人机验证，完成后会自动继续提交。", category: .security)
+        scheduleCaptchaWatchTick(watchID: watchID)
+    }
+
+    private func scheduleCaptchaWatchTick(watchID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.captchaWatchInterval) { [weak self] in
+            self?.runCaptchaWatchTick(watchID: watchID)
+        }
+    }
+
+    private func runCaptchaWatchTick(watchID: UUID) {
+        guard captchaWatchID == watchID else { return }
+        guard webView != nil else {
+            finishCaptchaWatch(message: "问卷页面已关闭，等待人工验证结束。", level: .warning)
+            return
+        }
+        captchaWatchTicks += 1
+        guard captchaWatchTicks <= Self.maximumCaptchaWatchTicks else {
+            finishCaptchaWatch(message: "等待人工完成验证超时，已停止自动继续。", level: .warning)
+            return
+        }
+        if webView?.isLoading == true {
+            scheduleCaptchaWatchTick(watchID: watchID)
+            return
+        }
+
+        scanPage { [weak self] state in
+            guard let self, self.captchaWatchID == watchID else { return }
+            switch state {
+            case .ready:
+                self.captchaResumeCount += 1
+                self.finishCaptchaWatch(
+                    message: "人机验证已完成，正在继续提交（第 \(self.captchaResumeCount) 次）。",
+                    level: .success
+                )
+                self.hasAutoSubmittedCurrentForm = true
+                self.submitOnce(showScheduledNotice: false, source: "验证完成后继续提交")
+            case .submitted(let message):
+                self.finishCaptchaWatch(
+                    message: "人机验证完成后问卷已提交：\(message)",
+                    level: .success
+                )
+            case .closed(let message):
+                self.finishCaptchaWatch(message: "问卷已不可提交：\(message)", level: .warning)
+            case .captchaRequired, .failed, .loading:
+                self.scheduleCaptchaWatchTick(watchID: watchID)
+            }
+        }
+    }
+
+    private func finishCaptchaWatch(message: String, level: AutomationLogLevel) {
+        captchaWatchID = nil
+        captchaWatchTicks = 0
+        isAwaitingCaptchaCompletion = false
+        appendLog(message, level: level, category: .security)
+    }
+
+    private func cancelCaptchaWatch() {
+        captchaWatchID = nil
+        captchaWatchTicks = 0
+        captchaResumeCount = 0
+        isAwaitingCaptchaCompletion = false
+    }
+
+    /// 用户自己确认验证已过时的手动入口，避免轮询判断不出来时卡住。
+    func resumeAfterManualCaptcha() {
+        guard isAwaitingCaptchaCompletion || state == .captchaRequired else { return }
+        captchaWatchID = nil
+        captchaWatchTicks = 0
+        isAwaitingCaptchaCompletion = false
+        captchaResumeCount += 1
+        appendLog("已按你的确认继续提交（第 \(captchaResumeCount) 次）。", category: .security)
+        hasAutoSubmittedCurrentForm = true
+        submitOnce(showScheduledNotice: false, source: "手动继续提交")
     }
 
     private func resetQueueSummary() {

@@ -810,12 +810,43 @@ private struct SurveyPageView: View {
                 ProgressView(value: webController.queueSnapshot.progress)
                     .tint(statusColor)
             }
+
+            if webController.isAwaitingCaptchaCompletion {
+                captchaHandoffBanner
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity)
         .background(Color(uiColor: .systemBackground))
         .animation(.easeInOut(duration: 0.2), value: webController.queueSnapshot.progress)
+    }
+
+    /// 人机验证只能由用户亲手完成，这里只给出提示与「已完成」入口，不做任何绕过。
+    private var captchaHandoffBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.badge.key.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+            Text("请在页面上完成智能验证，完成后自动继续提交")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 6)
+            Button("已完成") {
+                webController.resumeAfterManualCaptcha()
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(.orange)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
     }
 
     private var invalidURLView: some View {
