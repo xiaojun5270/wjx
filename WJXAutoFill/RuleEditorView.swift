@@ -7,6 +7,7 @@ struct RuleEditorView: View {
         case preset = "预设"
         case batch = "批量"
         case api = "API"
+        case headers = "请求头"
 
         var id: String { rawValue }
     }
@@ -52,6 +53,8 @@ struct RuleEditorView: View {
                     batchOverview
                 case .api:
                     apiSettings
+                case .headers:
+                    RequestHeaderProfilesView(store: store)
                 }
             }
             .navigationTitle("问卷与预设")

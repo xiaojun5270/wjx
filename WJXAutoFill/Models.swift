@@ -183,6 +183,10 @@ final class RuleStore: ObservableObject {
         didSet { WJXAPICredentialStore.storeAccessToken(officialAPIAccessToken) }
     }
 
+    @Published var requestHeaderProfiles: [RequestHeaderProfile] {
+        didSet { RequestHeaderProfileStore.store(requestHeaderProfiles) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         surveyURLString = defaults.string(forKey: Key.surveyURL)
@@ -216,6 +220,7 @@ final class RuleStore: ObservableObject {
             officialAPISettings = .defaultValue
         }
         officialAPIAccessToken = WJXAPICredentialStore.readAccessToken()
+        requestHeaderProfiles = RequestHeaderProfileStore.read()
 
         let rawPresets: [SubmissionPreset]
         if let data = defaults.data(forKey: Key.presets),
@@ -361,6 +366,49 @@ final class RuleStore: ObservableObject {
             86_400
         )
         officialAPISettings = settings
+    }
+
+    func upsertRequestHeaderProfile(_ profile: RequestHeaderProfile) {
+        var normalized = profile
+        normalized.name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized.urlPattern = profile.urlPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized.headers = profile.headers.map { header in
+            var value = header
+            value.name = header.normalizedName
+            value.value = header.value.trimmingCharacters(in: .newlines)
+            if value.action == .delete { value.value = "" }
+            return value
+        }
+        if let index = requestHeaderProfiles.firstIndex(where: { $0.id == normalized.id }) {
+            requestHeaderProfiles[index] = normalized
+        } else {
+            requestHeaderProfiles.append(normalized)
+        }
+    }
+
+    func setRequestHeaderProfileEnabled(_ profileID: UUID, enabled: Bool) {
+        guard let index = requestHeaderProfiles.firstIndex(where: { $0.id == profileID }) else {
+            return
+        }
+        requestHeaderProfiles[index].isEnabled = enabled
+    }
+
+    func cloneRequestHeaderProfile(_ profileID: UUID) {
+        guard var profile = requestHeaderProfiles.first(where: { $0.id == profileID }) else {
+            return
+        }
+        profile.id = UUID()
+        profile.name += " 副本"
+        profile.headers = profile.headers.map { header in
+            var copy = header
+            copy.id = UUID()
+            return copy
+        }
+        requestHeaderProfiles.append(profile)
+    }
+
+    func deleteRequestHeaderProfile(_ profileID: UUID) {
+        requestHeaderProfiles.removeAll { $0.id == profileID }
     }
 
     private func persistPresets() {

@@ -953,7 +953,8 @@ private struct SurveyPageView: View {
                             submitDelaySeconds: session.submitDelaySeconds,
                             isSelected: isSelected,
                             initialLoadDelaySeconds: 0,
-                            officialAPIModeEnabled: store.officialAPISettings.isEnabled
+                            officialAPIModeEnabled: store.officialAPISettings.isEnabled,
+                            requestHeaderProfiles: store.requestHeaderProfiles
                         )
                     }
                 } else {

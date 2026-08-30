@@ -123,6 +123,7 @@ final class SurveyWebController: ObservableObject {
     private var loadStartWatchdogWorkItem: DispatchWorkItem?
     private var isPageSelected = false
     private var isOfficialAPIMode = false
+    private var requestHeaderProfiles: [RequestHeaderProfile] = []
 
     private static let maximumAutomaticPageRecoveryAttempts = 2
     private static let maximumComponentReadinessAttempts = 20
@@ -256,6 +257,10 @@ final class SurveyWebController: ObservableObject {
         }
     }
 
+    fileprivate func setRequestHeaderProfiles(_ profiles: [RequestHeaderProfile]) {
+        requestHeaderProfiles = profiles
+    }
+
     @discardableResult
     fileprivate func scheduleProgrammaticLoad(
         url: URL,
@@ -277,13 +282,16 @@ final class SurveyWebController: ObservableObject {
                 return false
             }
             self.startLoadStartWatchdog(requestID: requestID)
-            let navigation = webView.load(
-                URLRequest(
-                    url: url,
-                    cachePolicy: cachePolicy,
-                    timeoutInterval: 30
-                )
+            var request = URLRequest(
+                url: url,
+                cachePolicy: cachePolicy,
+                timeoutInterval: 30
             )
+            RequestHeaderResolver.apply(
+                profiles: self.requestHeaderProfiles,
+                to: &request
+            )
+            let navigation = webView.load(request)
             guard navigation != nil else {
                 self.cancelLoadStartWatchdog()
                 self.loadGateRequestID = nil
@@ -2081,6 +2089,7 @@ struct SurveyWebView: UIViewRepresentable {
     let isSelected: Bool
     let initialLoadDelaySeconds: TimeInterval
     let officialAPIModeEnabled: Bool
+    let requestHeaderProfiles: [RequestHeaderProfile]
 
     private static let sharedProcessPool = WKProcessPool()
 
@@ -2108,7 +2117,13 @@ struct SurveyWebView: UIViewRepresentable {
 
         controller.webView = webView
         controller.setOfficialAPIMode(officialAPIModeEnabled)
+        controller.setRequestHeaderProfiles(requestHeaderProfiles)
         controller.setPageSelected(isSelected)
+        context.coordinator.updateRequestHeaderConfiguration(
+            in: webView,
+            profiles: requestHeaderProfiles,
+            url: url
+        )
         context.coordinator.loadedURL = url
         controller.prepareForNewSurvey(url)
         context.coordinator.scheduleSurveyLoad(in: webView, url: url)
@@ -2119,7 +2134,13 @@ struct SurveyWebView: UIViewRepresentable {
         context.coordinator.parent = self
         controller.webView = webView
         controller.setOfficialAPIMode(officialAPIModeEnabled)
+        controller.setRequestHeaderProfiles(requestHeaderProfiles)
         controller.setPageSelected(isSelected)
+        context.coordinator.updateRequestHeaderConfiguration(
+            in: webView,
+            profiles: requestHeaderProfiles,
+            url: url
+        )
         if context.coordinator.loadedURL != url {
             context.coordinator.loadedURL = url
             controller.prepareForNewSurvey(url)
@@ -2147,9 +2168,48 @@ struct SurveyWebView: UIViewRepresentable {
         private var hasStartedScheduledLoad = false
         private var navigationWatchdogWorkItem: DispatchWorkItem?
         private var completedProgrammaticRequestID: UUID?
+        private var installedRequestHeaderProfiles: [RequestHeaderProfile]?
 
         init(parent: SurveyWebView) {
             self.parent = parent
+        }
+
+        func updateRequestHeaderConfiguration(
+            in webView: WKWebView,
+            profiles: [RequestHeaderProfile],
+            url: URL
+        ) {
+            let effectiveURL = webView.url ?? url
+            webView.customUserAgent = RequestHeaderResolver.customUserAgent(
+                for: effectiveURL,
+                profiles: profiles
+            )
+            guard installedRequestHeaderProfiles != profiles else { return }
+            let previouslyHadEnabledProfiles = installedRequestHeaderProfiles?
+                .contains(where: \.isEnabled) == true
+            installedRequestHeaderProfiles = profiles
+
+            let userContentController = webView.configuration.userContentController
+            userContentController.removeAllUserScripts()
+            let hasEnabledProfiles = profiles.contains(where: \.isEnabled)
+            if !hasEnabledProfiles {
+                if previouslyHadEnabledProfiles,
+                   let source = RequestHeaderResolver.injectionScript(profiles: []) {
+                    webView.evaluateJavaScript(source)
+                }
+                return
+            }
+            guard let source = RequestHeaderResolver.injectionScript(profiles: profiles) else {
+                return
+            }
+            userContentController.addUserScript(
+                WKUserScript(
+                    source: source,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: false
+                )
+            )
+            webView.evaluateJavaScript(source)
         }
 
         func scheduleSurveyLoad(in webView: WKWebView, url: URL) {
@@ -2230,6 +2290,11 @@ struct SurveyWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            updateRequestHeaderConfiguration(
+                in: webView,
+                profiles: parent.requestHeaderProfiles,
+                url: webView.url ?? parent.url
+            )
             parent.controller.handleProgrammaticNavigationStarted()
             if let completedProgrammaticRequestID,
                parent.controller.programmaticLoadRequestID == completedProgrammaticRequestID {
@@ -2262,6 +2327,11 @@ struct SurveyWebView: UIViewRepresentable {
             activeNavigation = nil
             activeNavigationGeneration = nil
             completedProgrammaticRequestID = parent.controller.programmaticLoadRequestID
+            updateRequestHeaderConfiguration(
+                in: webView,
+                profiles: parent.requestHeaderProfiles,
+                url: webView.url ?? parent.url
+            )
             parent.controller.handlePageLoaded(
                 navigationGeneration: generation,
                 defaultRules: parent.rules,
