@@ -148,6 +148,7 @@ final class RuleStore: ObservableObject {
         static let autoFill = "autoFillOnLoad.v1"
         static let autoSubmit = "autoSubmitAfterFill.v1"
         static let submitDelay = "submitDelaySeconds.v1"
+        static let officialAPISettings = "officialAPISettings.v1"
     }
 
     private let defaults: UserDefaults
@@ -174,6 +175,14 @@ final class RuleStore: ObservableObject {
 
     @Published private(set) var submitDelaySeconds: Int
 
+    @Published var officialAPISettings: WJXOfficialAPISettings {
+        didSet { persistOfficialAPISettings() }
+    }
+
+    @Published var officialAPIAccessToken: String {
+        didSet { WJXAPICredentialStore.storeAccessToken(officialAPIAccessToken) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         surveyURLString = defaults.string(forKey: Key.surveyURL)
@@ -199,6 +208,14 @@ final class RuleStore: ObservableObject {
         } else {
             submitDelaySeconds = 2
         }
+
+        if let data = defaults.data(forKey: Key.officialAPISettings),
+           let decoded = try? JSONDecoder().decode(WJXOfficialAPISettings.self, from: data) {
+            officialAPISettings = decoded
+        } else {
+            officialAPISettings = .defaultValue
+        }
+        officialAPIAccessToken = WJXAPICredentialStore.readAccessToken()
 
         let rawPresets: [SubmissionPreset]
         if let data = defaults.data(forKey: Key.presets),
@@ -274,6 +291,17 @@ final class RuleStore: ObservableObject {
         parallelValidationMessage == nil
     }
 
+    var officialAPIValidationMessage: String? {
+        if let presetMessage = parallelValidationMessage {
+            return presetMessage
+        }
+        return officialAPISettings.validationMessage(accessToken: officialAPIAccessToken)
+    }
+
+    var isOfficialAPIReady: Bool {
+        officialAPISettings.isEnabled && officialAPIValidationMessage == nil
+    }
+
     func validationMessage(for preset: SubmissionPreset) -> String? {
         if !preset.missingQuestions.isEmpty {
             return "缺少" + preset.missingQuestions.joined(separator: "、")
@@ -320,9 +348,29 @@ final class RuleStore: ObservableObject {
         defaults.set(clampedValue, forKey: Key.submitDelay)
     }
 
+    func updateOfficialAPISettings(
+        _ update: (inout WJXOfficialAPISettings) -> Void
+    ) {
+        var settings = officialAPISettings
+        update(&settings)
+        settings.nameQuestionNumber = max(settings.nameQuestionNumber, 1)
+        settings.employeeQuestionNumber = max(settings.employeeQuestionNumber, 1)
+        settings.emailQuestionNumber = max(settings.emailQuestionNumber, 0)
+        settings.inputCostTimeSeconds = min(
+            max(settings.inputCostTimeSeconds, 2),
+            86_400
+        )
+        officialAPISettings = settings
+    }
+
     private func persistPresets() {
         guard let data = try? JSONEncoder().encode(presets) else { return }
         defaults.set(data, forKey: Key.presets)
+    }
+
+    private func persistOfficialAPISettings() {
+        guard let data = try? JSONEncoder().encode(officialAPISettings) else { return }
+        defaults.set(data, forKey: Key.officialAPISettings)
     }
 
     private func fixedRuleIndex(keyword: String, presetIndex: Int) -> Int? {

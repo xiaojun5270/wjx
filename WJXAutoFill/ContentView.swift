@@ -6,10 +6,13 @@ struct ContentView: View {
     @StateObject private var store: RuleStore
     @StateObject private var workspace: SurveyWorkspace
     @StateObject private var refreshScheduler = ScheduledPageRefreshScheduler()
+    @StateObject private var apiController = WJXAPIBatchController()
     @State private var workspaceNotice: UserNotice?
     @State private var showingScheduledRefresh = false
     @State private var syncSubmitPlan: SurveyWorkspace.SyncSubmitPlan?
     @State private var showingSyncSubmitConfirm = false
+    @State private var showingAPISubmitConfirm = false
+    @State private var showingAPILogs = false
 
     init() {
         let store = RuleStore()
@@ -51,6 +54,11 @@ struct ContentView: View {
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
         }
+        .sheet(isPresented: $showingAPILogs) {
+            WJXAPILogView(controller: apiController)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
         .confirmationDialog(
             "同步提交",
             isPresented: $showingSyncSubmitConfirm,
@@ -67,10 +75,32 @@ struct ContentView: View {
         } message: {
             Text(syncSubmitConfirmMessage)
         }
+        .confirmationDialog(
+            "官方 API 批量提交",
+            isPresented: $showingAPISubmitConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("通过 API 提交 10 组") {
+                performOfficialAPISubmit()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(officialAPIConfirmMessage)
+        }
         .onChange(of: refreshScheduler.firedTarget) { target in
             guard let target else { return }
             performScheduledRefresh(target: target)
             refreshScheduler.consumeFiredTarget(target)
+        }
+        .onChange(of: store.officialAPISettings.isEnabled) { isEnabled in
+            guard isEnabled else { return }
+            workspace.setSyncSubmitEnabled(false)
+            workspace.pages.forEach { $0.controller.prepareForOfficialAPIMode() }
+        }
+        .onAppear {
+            guard store.officialAPISettings.isEnabled else { return }
+            workspace.setSyncSubmitEnabled(false)
+            workspace.pages.forEach { $0.controller.prepareForOfficialAPIMode() }
         }
     }
 
@@ -210,7 +240,11 @@ struct ContentView: View {
 
             Divider()
 
-            syncSubmitControls(isCompact: isCompact)
+            if store.officialAPISettings.isEnabled {
+                officialAPIControls(isCompact: isCompact)
+            } else {
+                syncSubmitControls(isCompact: isCompact)
+            }
 
             Divider()
 
@@ -357,6 +391,131 @@ struct ContentView: View {
             .padding(.horizontal, isCompact ? 6 : 12)
             .padding(.bottom, 9)
             .accessibilityLabel("同时提交所有已填好的页面")
+        }
+    }
+
+    private func officialAPIControls(isCompact: Bool) -> some View {
+        VStack(spacing: 0) {
+            Button {
+                showingAPILogs = true
+            } label: {
+                HStack(spacing: isCompact ? 4 : 7) {
+                    Image(systemName: officialAPIStatusIcon)
+                        .font(.caption)
+                    Text(isCompact ? "API" : officialAPIStatusTitle)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    if !isCompact {
+                        Spacer(minLength: 0)
+                        Image(systemName: "list.bullet.rectangle")
+                            .font(.caption)
+                    }
+                }
+                .foregroundStyle(officialAPIStatusColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, isCompact ? 7 : 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .help("查看 API 运行日志")
+
+            Button(action: prepareOfficialAPISubmit) {
+                HStack(spacing: isCompact ? 3 : 6) {
+                    if apiController.isSubmitting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                            .font(.caption)
+                    }
+                    Text(isCompact ? "提交" : "API 提交 10 组")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(.blue)
+            .disabled(apiController.isSubmitting)
+            .padding(.horizontal, isCompact ? 6 : 12)
+            .padding(.bottom, 9)
+            .accessibilityLabel("通过官方 API 提交 10 组预设")
+        }
+    }
+
+    private var officialAPIStatusTitle: String {
+        switch apiController.state {
+        case .idle:
+            return store.isOfficialAPIReady ? "官方 API 已就绪" : "API 配置不完整"
+        case .submitting(let total):
+            return "API 正在提交 \(total) 组"
+        case .completed(let summary):
+            return "API 成功 \(summary.succeeded) · 失败 \(summary.failed)"
+        case .failed:
+            return "API 提交失败"
+        }
+    }
+
+    private var officialAPIStatusIcon: String {
+        switch apiController.state {
+        case .submitting: return "arrow.triangle.2.circlepath"
+        case .completed(let summary):
+            return summary.failed == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+        case .failed: return "xmark.octagon.fill"
+        case .idle:
+            return store.isOfficialAPIReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var officialAPIStatusColor: Color {
+        switch apiController.state {
+        case .submitting: return .blue
+        case .completed(let summary): return summary.failed == 0 ? .green : .orange
+        case .failed: return .red
+        case .idle: return store.isOfficialAPIReady ? .green : .orange
+        }
+    }
+
+    private var officialAPIConfirmMessage: String {
+        let vid = store.officialAPISettings.surveyID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return "将通过你的安全网关向问卷 vid=\(vid) 提交 10 组预设。此操作不点击网页，也不会使用网页验证码。请确认这是你有权测试的问卷。"
+    }
+
+    private func prepareOfficialAPISubmit() {
+        guard !apiController.isSubmitting else { return }
+        guard store.officialAPISettings.isEnabled else {
+            workspaceNotice = UserNotice(title: "API 模式未开启", message: "请先在“问卷与预设 → API”中开启官方 API 模式。")
+            return
+        }
+        if let message = store.officialAPIValidationMessage {
+            workspaceNotice = UserNotice(title: "API 配置不完整", message: message)
+            return
+        }
+        showingAPISubmitConfirm = true
+    }
+
+    private func performOfficialAPISubmit() {
+        apiController.submit(
+            presets: store.queuePresets,
+            settings: store.officialAPISettings,
+            accessToken: store.officialAPIAccessToken
+        ) { result in
+            switch result {
+            case .success(let summary):
+                self.workspaceNotice = UserNotice(
+                    title: summary.failed == 0 ? "API 提交完成" : "API 提交部分失败",
+                    message: summary.message + "请在 API 日志中查看每组结果。"
+                )
+            case .failure(let error):
+                self.workspaceNotice = UserNotice(
+                    title: "API 提交失败",
+                    message: error.localizedDescription
+                )
+            }
         }
     }
 
@@ -793,7 +952,8 @@ private struct SurveyPageView: View {
                             autoSubmitAfterFill: session.autoSubmitAfterFill,
                             submitDelaySeconds: session.submitDelaySeconds,
                             isSelected: isSelected,
-                            initialLoadDelaySeconds: 0
+                            initialLoadDelaySeconds: 0,
+                            officialAPIModeEnabled: store.officialAPISettings.isEnabled
                         )
                     }
                 } else {
@@ -1189,6 +1349,86 @@ private struct SurveyPageView: View {
         }
     }
 
+}
+
+private struct WJXAPILogView: View {
+    @ObservedObject var controller: WJXAPIBatchController
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if controller.logs.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "network")
+                            .font(.system(size: 30, weight: .light))
+                            .foregroundStyle(.secondary)
+                        Text("暂无 API 日志")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(controller.logs.reversed()) { entry in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: iconName(for: entry.level))
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(color(for: entry.level))
+                                .frame(width: 22, height: 22)
+
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(entry.timestamp.formatted(date: .omitted, time: .standard))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Text(entry.message)
+                                    .font(.subheadline)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("API 运行日志")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    ShareLink(item: controller.logExportText) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .disabled(controller.logs.isEmpty)
+                    Button(role: .destructive) {
+                        controller.clearLogs()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(controller.logs.isEmpty)
+                }
+            }
+        }
+    }
+
+    private func iconName(for level: AutomationLogLevel) -> String {
+        switch level {
+        case .info: return "info.circle.fill"
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error: return "xmark.octagon.fill"
+        }
+    }
+
+    private func color(for level: AutomationLogLevel) -> Color {
+        switch level {
+        case .info: return .blue
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        }
+    }
 }
 
 private struct AutomationLogView: View {

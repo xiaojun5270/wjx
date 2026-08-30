@@ -6,6 +6,7 @@ struct RuleEditorView: View {
         case survey = "问卷"
         case preset = "预设"
         case batch = "批量"
+        case api = "API"
 
         var id: String { rawValue }
     }
@@ -49,6 +50,8 @@ struct RuleEditorView: View {
                     presetEditor
                 case .batch:
                     batchOverview
+                case .api:
+                    apiSettings
                 }
             }
             .navigationTitle("问卷与预设")
@@ -124,6 +127,109 @@ struct RuleEditorView: View {
                             .foregroundStyle(preset.isQueueReady ? Color.green : Color.orange)
                     }
                 }
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    private var apiSettings: some View {
+        Form {
+            Section {
+                Toggle(
+                    isOn: apiSettingsBinding(\.isEnabled)
+                ) {
+                    Label("使用官方 API 提交", systemImage: "network")
+                }
+
+                HStack(spacing: 8) {
+                    Image(
+                        systemName: areOfficialAPISettingsValid
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(areOfficialAPISettingsValid ? Color.green : Color.orange)
+                    Text(apiSettingsValidationMessage ?? "API 配置完整")
+                    .font(.subheadline)
+                    .foregroundStyle(areOfficialAPISettingsValid ? Color.primary : Color.orange)
+                }
+            } header: {
+                Text("官方 API 模式")
+            } footer: {
+                Text("开启后批量按钮直接调用 API，网页自动填写和网页自动提交会停用，避免重复答卷。")
+            }
+
+            Section {
+                TextField(
+                    "https://api.example.com",
+                    text: apiSettingsBinding(\.gatewayURLString)
+                )
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+
+                SecureField("网关访问令牌", text: officialAPITokenBinding)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } header: {
+                Text("安全网关")
+            } footer: {
+                Text("这里只填写你自己的 HTTPS 网关地址。问卷星 appid 和 appkey 只放在网关环境变量中，不写入 IPA。")
+            }
+
+            Section("问卷与题号") {
+                TextField(
+                    "数字问卷编号 vid",
+                    text: apiSettingsBinding(\.surveyID)
+                )
+                .keyboardType(.numberPad)
+
+                apiQuestionNumberField(
+                    title: "姓名题号",
+                    keyPath: \.nameQuestionNumber,
+                    range: 1...10_000
+                )
+                apiQuestionNumberField(
+                    title: "工号题号",
+                    keyPath: \.employeeQuestionNumber,
+                    range: 1...10_000
+                )
+                apiQuestionNumberField(
+                    title: "邮箱题号",
+                    keyPath: \.emailQuestionNumber,
+                    range: 0...10_000
+                )
+
+                Text("问卷没有邮箱题时，将邮箱题号设为 0；预设里的邮箱仍会保留。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                HStack(spacing: 10) {
+                    Label("填写耗时", systemImage: "timer")
+                    Spacer()
+                    TextField(
+                        "2",
+                        value: apiSettingsBinding(\.inputCostTimeSeconds),
+                        format: .number
+                    )
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 76)
+                    Text("秒")
+                        .foregroundStyle(.secondary)
+                    Stepper(
+                        "填写耗时",
+                        value: apiSettingsBinding(\.inputCostTimeSeconds),
+                        in: 2...86_400
+                    )
+                    .labelsHidden()
+                }
+            } header: {
+                Text("提交参数")
+            } footer: {
+                Text("官方文档说明填写耗时小于或等于 1 秒会被视为机器提交，因此最低限制为 2 秒。网关还会按照配置控制请求间隔。")
             }
         }
         .scrollDismissesKeyboard(.interactively)
@@ -491,6 +597,62 @@ struct RuleEditorView: View {
             get: { store.fixedAnswer(for: keyword, presetID: presetID) },
             set: { store.setFixedAnswer($0, for: keyword, presetID: presetID) }
         )
+    }
+
+    private func apiSettingsBinding<Value>(
+        _ keyPath: WritableKeyPath<WJXOfficialAPISettings, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { store.officialAPISettings[keyPath: keyPath] },
+            set: { value in
+                store.updateOfficialAPISettings { settings in
+                    settings[keyPath: keyPath] = value
+                }
+            }
+        )
+    }
+
+    private var officialAPITokenBinding: Binding<String> {
+        Binding(
+            get: { store.officialAPIAccessToken },
+            set: { store.officialAPIAccessToken = $0 }
+        )
+    }
+
+    private var apiSettingsValidationMessage: String? {
+        store.officialAPISettings.validationMessage(
+            accessToken: store.officialAPIAccessToken
+        )
+    }
+
+    private var areOfficialAPISettingsValid: Bool {
+        apiSettingsValidationMessage == nil
+    }
+
+    private func apiQuestionNumberField(
+        title: String,
+        keyPath: WritableKeyPath<WJXOfficialAPISettings, Int>,
+        range: ClosedRange<Int>
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(
+                "0",
+                value: apiSettingsBinding(keyPath),
+                format: .number
+            )
+            .keyboardType(.numberPad)
+            .multilineTextAlignment(.trailing)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 76)
+            Stepper(
+                title,
+                value: apiSettingsBinding(keyPath),
+                in: range
+            )
+            .labelsHidden()
+        }
     }
 
     private var submitDelayBinding: Binding<Int> {

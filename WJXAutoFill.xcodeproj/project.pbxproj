@@ -14,6 +14,7 @@
 		A10000000000000000000005 /* AutomationScript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* AutomationScript.swift */; };
 		A10000000000000000000006 /* RuleEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* RuleEditorView.swift */; };
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* Assets.xcassets */; };
+		A10000000000000000000008 /* WJXOfficialAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* WJXOfficialAPI.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +26,7 @@
 		A20000000000000000000006 /* RuleEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleEditorView.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* WJXAutoFill.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WJXAutoFill.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A20000000000000000000009 /* WJXOfficialAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WJXOfficialAPI.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,6 +57,7 @@
 				A20000000000000000000004 /* SurveyWebView.swift */,
 				A20000000000000000000005 /* AutomationScript.swift */,
 				A20000000000000000000006 /* RuleEditorView.swift */,
+				A20000000000000000000009 /* WJXOfficialAPI.swift */,
 				A20000000000000000000008 /* Assets.xcassets */,
 			);
 			path = WJXAutoFill;
@@ -144,6 +147,7 @@
 				A10000000000000000000004 /* SurveyWebView.swift in Sources */,
 				A10000000000000000000005 /* AutomationScript.swift in Sources */,
 				A10000000000000000000006 /* RuleEditorView.swift in Sources */,
+				A10000000000000000000008 /* WJXOfficialAPI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
