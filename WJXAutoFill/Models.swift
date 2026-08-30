@@ -441,6 +441,24 @@ final class SurveyWorkspace: ObservableObject {
     private struct WorkspaceSnapshot: Codable {
         let pages: [PageSnapshot]
         let selectedPageID: UUID?
+        /// 旧版本快照没有这两个字段，用可选类型保证仍能解码。
+        let syncSubmitEnabled: Bool?
+        let autoSubmitBackup: [String: Bool]?
+    }
+
+    /// 一次同步提交的计划：哪些页面可以立刻提交，哪些被跳过以及原因。
+    struct SyncSubmitPlan {
+        struct SkippedPage: Identifiable {
+            let id: UUID
+            let pageNumber: Int
+            let reason: String
+        }
+
+        var readyPageIDs: [UUID] = []
+        var readyPageNumbers: [Int] = []
+        var skipped: [SkippedPage] = []
+
+        var isEmpty: Bool { readyPageIDs.isEmpty }
     }
 
     @Published private(set) var pages: [SurveyPageSession]
@@ -448,8 +466,14 @@ final class SurveyWorkspace: ObservableObject {
         didSet { persistWorkspace() }
     }
 
+    /// 同步提交模式：打开后各页面只自动填写并停在填好状态，等用户手动一次性触发提交。
+    /// 用 `setSyncSubmitEnabled(_:)` 修改，避免 init 里恢复状态时误改各页开关。
+    @Published private(set) var isSyncSubmitEnabled = false
+
     private let defaults: UserDefaults
     private var pageObservers: [UUID: AnyCancellable] = [:]
+    /// 进入同步提交模式前各页面原本的「填写后自动提交」开关，退出时用于还原。
+    private var autoSubmitBackup: [UUID: Bool] = [:]
 
     init(
         defaultURLString: String,
@@ -494,6 +518,16 @@ final class SurveyWorkspace: ObservableObject {
             selectedPageID = restoredSelectedID.flatMap { selectedID in
                 restoredPages.contains(where: { $0.id == selectedID }) ? selectedID : nil
             } ?? restoredPages.first?.id
+        }
+
+        // 直接在 init 里赋值不会触发 didSet，所以这里只恢复状态，不重复应用开关。
+        isSyncSubmitEnabled = restoredSnapshot?.syncSubmitEnabled ?? false
+        if isSyncSubmitEnabled, let backup = restoredSnapshot?.autoSubmitBackup {
+            let livePageIDs = Set(pages.map(\.id))
+            autoSubmitBackup = backup.reduce(into: [UUID: Bool]()) { result, entry in
+                guard let id = UUID(uuidString: entry.key), livePageIDs.contains(id) else { return }
+                result[id] = entry.value
+            }
         }
 
         observeAllPages()
@@ -561,6 +595,7 @@ final class SurveyWorkspace: ObservableObject {
             autoSubmitAfterFill: autoSubmitAfterFill,
             submitDelaySeconds: submitDelaySeconds
         )
+        prepareForSyncSubmitModeIfNeeded(page)
         pages.append(page)
         pages.sort { $0.pageNumber < $1.pageNumber }
         observePage(page)
@@ -585,6 +620,7 @@ final class SurveyWorkspace: ObservableObject {
             autoSubmitAfterFill: selectedPage.autoSubmitAfterFill,
             submitDelaySeconds: selectedPage.submitDelaySeconds
         )
+        prepareForSyncSubmitModeIfNeeded(page)
         pages.append(page)
         pages.sort { $0.pageNumber < $1.pageNumber }
         observePage(page)
@@ -599,6 +635,7 @@ final class SurveyWorkspace: ObservableObject {
         let page = pages[index]
         page.controller.shutdown()
         pageObservers.removeValue(forKey: pageID)
+        autoSubmitBackup.removeValue(forKey: pageID)
         pages.remove(at: index)
 
         if selectedPageID == pageID {
@@ -607,6 +644,83 @@ final class SurveyWorkspace: ObservableObject {
         } else {
             persistWorkspace()
         }
+    }
+
+    // MARK: - 同步提交
+
+    func setSyncSubmitEnabled(_ enabled: Bool) {
+        guard enabled != isSyncSubmitEnabled else { return }
+        isSyncSubmitEnabled = enabled
+        applySyncSubmitMode(enabled: enabled)
+        persistWorkspace()
+    }
+
+    /// 切换同步提交模式：打开时把各页面的自动提交暂时关掉（记下原值），关闭时还原。
+    private func applySyncSubmitMode(enabled: Bool) {
+        if enabled {
+            for page in pages where page.autoSubmitAfterFill {
+                autoSubmitBackup[page.id] = true
+                page.autoSubmitAfterFill = false
+            }
+        } else {
+            for page in pages {
+                guard let restored = autoSubmitBackup[page.id] else { continue }
+                page.autoSubmitAfterFill = restored
+            }
+            autoSubmitBackup.removeAll()
+        }
+    }
+
+    /// 同步提交模式下新增的页面同样只填不交。
+    private func prepareForSyncSubmitModeIfNeeded(_ page: SurveyPageSession) {
+        guard isSyncSubmitEnabled, page.autoSubmitAfterFill else { return }
+        autoSubmitBackup[page.id] = true
+        page.autoSubmitAfterFill = false
+    }
+
+    /// 先算出这一次同步提交会碰到哪些页面，供确认弹窗展示，不产生任何副作用。
+    func syncSubmitPlan() -> SyncSubmitPlan {
+        var plan = SyncSubmitPlan()
+        for page in pages {
+            if let reason = page.controller.syncSubmitBlockReason {
+                plan.skipped.append(
+                    SyncSubmitPlan.SkippedPage(
+                        id: page.id,
+                        pageNumber: page.pageNumber,
+                        reason: reason
+                    )
+                )
+            } else {
+                plan.readyPageIDs.append(page.id)
+                plan.readyPageNumbers.append(page.pageNumber)
+            }
+        }
+        return plan
+    }
+
+    /// 按计划提交：在同一轮主线程循环里让每一页各自点击自己页面的提交按钮。
+    /// 这里不合并请求、不代发请求，只是把多次真实点击安排在同一时刻。
+    @discardableResult
+    func submitPagesTogether(_ plan: SyncSubmitPlan) -> [Int] {
+        for skipped in plan.skipped {
+            guard let page = pages.first(where: { $0.id == skipped.id }) else { continue }
+            page.controller.noteSyncSubmitSkipped(reason: skipped.reason)
+        }
+
+        let readyPages = plan.readyPageIDs.compactMap { pageID in
+            pages.first { $0.id == pageID }
+        }
+        // 触发前再自检一次，避免确认弹窗停留期间页面状态变化。
+        let submittablePages = readyPages.filter { page in
+            guard let reason = page.controller.syncSubmitBlockReason else { return true }
+            page.controller.noteSyncSubmitSkipped(reason: reason)
+            return false
+        }
+
+        for page in submittablePages {
+            page.controller.submitOnce(showScheduledNotice: false, source: "同步提交")
+        }
+        return submittablePages.map(\.pageNumber)
     }
 
     private func nextPageNumber() -> Int? {
@@ -693,7 +807,11 @@ final class SurveyWorkspace: ObservableObject {
                     submitDelaySeconds: $0.submitDelaySeconds
                 )
             },
-            selectedPageID: selectedPageID
+            selectedPageID: selectedPageID,
+            syncSubmitEnabled: isSyncSubmitEnabled,
+            autoSubmitBackup: autoSubmitBackup.reduce(into: [String: Bool]()) { result, entry in
+                result[entry.key.uuidString] = entry.value
+            }
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults.set(data, forKey: Key.snapshot)

@@ -91,6 +91,8 @@ final class SurveyWebController: ObservableObject {
     @Published private(set) var batchScheduleRemainingSeconds = 0
     @Published private(set) var canGoBack = false
     @Published private(set) var isAwaitingCaptchaCompletion = false
+    /// 当前表单是否已经填入过内容，同步提交据此判断页面是否真的“填好在等”。
+    @Published private(set) var hasFilledCurrentForm = false
     @Published private(set) var logs: [AutomationLogEntry] = []
 
     fileprivate weak var webView: WKWebView?
@@ -324,6 +326,7 @@ final class SurveyWebController: ObservableObject {
         stopCountdownAutomation()
         cancelPendingAutoSubmit()
         hasAutoSubmittedCurrentForm = false
+        hasFilledCurrentForm = false
         state = .loading
         appendLog("返回上一页。", category: .page)
         guard webView.goBack() != nil else {
@@ -345,6 +348,7 @@ final class SurveyWebController: ObservableObject {
             self.isFilling = false
             switch evaluation {
             case .success(let matched, let filled):
+                self.hasFilledCurrentForm = self.hasFilledCurrentForm || filled > 0
                 self.appendLog(
                     "自动填写完成：匹配 \(matched) 条规则，填写 \(filled) 个控件。",
                     level: filled > 0 ? .success : .warning,
@@ -386,6 +390,7 @@ final class SurveyWebController: ObservableObject {
             self.isFilling = false
             switch evaluation {
             case .success(let matched, let filled):
+                self.hasFilledCurrentForm = self.hasFilledCurrentForm || filled > 0
                 self.appendLog(
                     "自动填写完成：匹配 \(matched) 条规则，填写 \(filled) 个控件。",
                     level: filled > 0 ? .success : .warning,
@@ -558,6 +563,51 @@ final class SurveyWebController: ObservableObject {
         stopQueue(message: "批量任务已由用户停止。", showNotice: true)
     }
 
+    // MARK: - 同步提交自检
+    //
+    // 同步提交只是把多页各自的“点自己页面上的提交按钮”安排在同一时刻，
+    // 不合并、不代发任何请求，所以每一页都要先自己确认状态可提交。
+
+    /// 返回 nil 表示这一页可以立刻提交；否则给出应当跳过的原因。
+    var syncSubmitBlockReason: String? {
+        if isAwaitingCaptchaCompletion {
+            return "正在等待你手动完成人机验证"
+        }
+        switch state {
+        case .loading:
+            return "页面仍在加载"
+        case .submitted:
+            return "本页已经提交过"
+        case .closed:
+            return "问卷当前不可提交"
+        case .captchaRequired:
+            return "需要先手动完成人机验证"
+        case .failed(let message):
+            return message.isEmpty ? "页面状态异常" : message
+        case .ready(let questionCount):
+            if questionCount <= 0 {
+                return "页面还没有识别到题目"
+            }
+            if isSubmitting || isWaitingToSubmit {
+                return "本页正在提交中"
+            }
+            if isBusy {
+                return "本页正忙"
+            }
+            if !hasFilledCurrentForm {
+                return "本页还没有填写内容"
+            }
+            if !canAttemptSubmit {
+                return "本页暂时不能提交"
+            }
+            return nil
+        }
+    }
+
+    func noteSyncSubmitSkipped(reason: String) {
+        appendLog("同步提交跳过本页：\(reason)", level: .warning, category: .submit)
+    }
+
     func submitOnce(showScheduledNotice: Bool = true, source: String = "手动提交") {
         guard !isBusy else { return }
         resetQueueSummary()
@@ -634,6 +684,7 @@ final class SurveyWebController: ObservableObject {
         isFilling = false
         isSubmitting = false
         hasAutoSubmittedCurrentForm = false
+        hasFilledCurrentForm = false
         canGoBack = false
         state = .loading
         appendLog("打开问卷：\(url.absoluteString)", category: .page)
@@ -645,6 +696,7 @@ final class SurveyWebController: ObservableObject {
         cancelAutomaticPageRecovery()
         stopCountdownAutomation()
         cancelPendingAutoSubmit()
+        hasFilledCurrentForm = false
         state = .loading
         canGoBack = false
         if let url = webView.url {

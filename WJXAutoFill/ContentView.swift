@@ -8,6 +8,8 @@ struct ContentView: View {
     @StateObject private var refreshScheduler = ScheduledPageRefreshScheduler()
     @State private var workspaceNotice: UserNotice?
     @State private var showingScheduledRefresh = false
+    @State private var syncSubmitPlan: SurveyWorkspace.SyncSubmitPlan?
+    @State private var showingSyncSubmitConfirm = false
 
     init() {
         let store = RuleStore()
@@ -48,6 +50,22 @@ struct ContentView: View {
             ScheduledRefreshSheet(scheduler: refreshScheduler)
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
+        }
+        .confirmationDialog(
+            "同步提交",
+            isPresented: $showingSyncSubmitConfirm,
+            titleVisibility: .visible
+        ) {
+            if let plan = syncSubmitPlan, !plan.isEmpty {
+                Button("同时提交 \(plan.readyPageIDs.count) 个页面") {
+                    performSyncSubmit(plan)
+                }
+            }
+            Button("取消", role: .cancel) {
+                syncSubmitPlan = nil
+            }
+        } message: {
+            Text(syncSubmitConfirmMessage)
         }
         .onChange(of: refreshScheduler.firedTarget) { target in
             guard let target else { return }
@@ -192,6 +210,10 @@ struct ContentView: View {
 
             Divider()
 
+            syncSubmitControls(isCompact: isCompact)
+
+            Divider()
+
             List {
                 ForEach(workspace.pages) { page in
                     SurveyPageSidebarRow(
@@ -277,6 +299,127 @@ struct ContentView: View {
                 title: "部分页面已刷新",
                 message: "已安排刷新 \(reloadablePages.count) 个页面；尚未加载或地址无效的页面已跳过。"
             )
+        }
+    }
+
+    /// 同步提交：各页面先各自填好停住，由用户一次性触发，每页仍然点击自己页面的提交按钮。
+    private func syncSubmitControls(isCompact: Bool) -> some View {
+        let modeTitle: String = isCompact ? "同步" : "同步提交模式"
+        let modeStateText: String = workspace.isSyncSubmitEnabled ? "开" : "关"
+        let submitTitle: String = isCompact ? "提交" : "全部同步提交"
+
+        return VStack(spacing: 0) {
+            Button {
+                workspace.setSyncSubmitEnabled(!workspace.isSyncSubmitEnabled)
+            } label: {
+                HStack(spacing: isCompact ? 4 : 7) {
+                    Image(
+                        systemName: workspace.isSyncSubmitEnabled
+                            ? "checkmark.circle.fill"
+                            : "circle"
+                    )
+                    .font(.caption)
+
+                    Text(modeTitle)
+                        .font(.caption.weight(.semibold))
+
+                    if !isCompact {
+                        Spacer(minLength: 0)
+                        Text(modeStateText)
+                            .font(.caption)
+                    }
+                }
+                .foregroundStyle(
+                    workspace.isSyncSubmitEnabled ? Color.orange : Color.primary
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, isCompact ? 7 : 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .help("打开后各页面只填写不提交，等你手动一次性触发")
+
+            Button(action: prepareSyncSubmit) {
+                HStack(spacing: isCompact ? 3 : 6) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.caption)
+                    Text(submitTitle)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(.orange)
+            .padding(.horizontal, isCompact ? 6 : 12)
+            .padding(.bottom, 9)
+            .accessibilityLabel("同时提交所有已填好的页面")
+        }
+    }
+
+    private var syncSubmitConfirmMessage: String {
+        guard let plan = syncSubmitPlan else { return "" }
+        var lines: [String] = []
+        let numbers = plan.readyPageNumbers.map(String.init).joined(separator: "、")
+        lines.append("将同时提交页面 \(numbers)，每个页面各自点击自己的提交按钮。")
+        if let detail = skippedPagesDetail(plan) {
+            lines.append(detail)
+        }
+        if !workspace.isSyncSubmitEnabled {
+            lines.append("同步提交模式未开启，页面可能会在填好后自行提交。")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func skippedPagesDetail(_ plan: SurveyWorkspace.SyncSubmitPlan) -> String? {
+        guard !plan.skipped.isEmpty else { return nil }
+        let detail = plan.skipped
+            .map { "页面 \($0.pageNumber)：\($0.reason)" }
+            .joined(separator: "；")
+        return "跳过 \(plan.skipped.count) 个页面 —— \(detail)。"
+    }
+
+    private func prepareSyncSubmit() {
+        let plan = workspace.syncSubmitPlan()
+        guard !plan.isEmpty else {
+            syncSubmitPlan = nil
+            var message = "当前没有页面处于填好待提交的状态。"
+            if let detail = skippedPagesDetail(plan) {
+                message += "\n\(detail)"
+            }
+            workspaceNotice = UserNotice(title: "暂时无法同步提交", message: message)
+            return
+        }
+        syncSubmitPlan = plan
+        showingSyncSubmitConfirm = true
+    }
+
+    private func performSyncSubmit(_ plan: SurveyWorkspace.SyncSubmitPlan) {
+        let submittedNumbers = workspace.submitPagesTogether(plan)
+        syncSubmitPlan = nil
+
+        let notice: UserNotice
+        if submittedNumbers.isEmpty {
+            notice = UserNotice(
+                title: "没有页面被提交",
+                message: "触发时所有页面都不处于可提交状态，详情见各页面日志。"
+            )
+        } else {
+            let numbers = submittedNumbers.map(String.init).joined(separator: "、")
+            var message = "已同时触发页面 \(numbers) 的提交，请留意各页面结果。"
+            if !plan.skipped.isEmpty {
+                message += "跳过了 \(plan.skipped.count) 个未就绪页面。"
+            }
+            message += "如果某个页面弹出人机验证，请在该页面手动完成。"
+            notice = UserNotice(title: "已触发同步提交", message: message)
+        }
+
+        // 等确认弹窗收起后再弹提示，避免两个 presentation 冲突。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.workspaceNotice = notice
         }
     }
 
@@ -941,7 +1084,7 @@ private struct SurveyPageView: View {
 
         switch webController.state {
         case .loading: return "正在加载问卷"
-        case .ready: return "问卷已就绪"
+        case .ready: return webController.hasFilledCurrentForm ? "已填好待提交" : "问卷已就绪"
         case .submitted: return "提交已完成"
         case .closed: return "问卷不可填写"
         case .captchaRequired: return "需要安全验证"
@@ -986,7 +1129,9 @@ private struct SurveyPageView: View {
         case .loading:
             return session.surveyURL?.host ?? "正在连接"
         case .ready(let count):
-            return "检测到 \(count) 道可填写题目"
+            return webController.hasFilledCurrentForm
+                ? "已填好 \(count) 道题目，等待提交"
+                : "检测到 \(count) 道可填写题目"
         case .submitted(let message), .closed(let message), .failed(let message):
             return message
         case .captchaRequired:
