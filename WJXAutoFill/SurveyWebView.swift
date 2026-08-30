@@ -91,7 +91,7 @@ final class SurveyWebController: ObservableObject {
     @Published private(set) var batchScheduleRemainingSeconds = 0
     @Published private(set) var canGoBack = false
     @Published private(set) var isAwaitingCaptchaCompletion = false
-    /// 当前表单是否已经填入过内容，同步提交据此判断页面是否真的“填好在等”。
+    /// 当前表单是否已经填入过内容，用于显示“已填好待提交”状态。
     @Published private(set) var hasFilledCurrentForm = false
     @Published private(set) var logs: [AutomationLogEntry] = []
 
@@ -122,7 +122,6 @@ final class SurveyWebController: ObservableObject {
     private var loadGateRequestID: UUID?
     private var loadStartWatchdogWorkItem: DispatchWorkItem?
     private var isPageSelected = false
-    private var isOfficialAPIMode = false
     private var requestHeaderProfiles: [RequestHeaderProfile] = []
 
     private static let maximumAutomaticPageRecoveryAttempts = 2
@@ -163,13 +162,13 @@ final class SurveyWebController: ObservableObject {
     }
 
     var canAttemptFill: Bool {
-        guard !isOfficialAPIMode, !isBusy else { return false }
+        guard !isBusy else { return false }
         if case .ready(_) = state { return true }
         return false
     }
 
     var canAttemptSubmit: Bool {
-        guard !isOfficialAPIMode, !isBusy else { return false }
+        guard !isBusy else { return false }
         if case .ready(_) = state { return true }
         return false
     }
@@ -184,34 +183,6 @@ final class SurveyWebController: ObservableObject {
 
     func clearLogs() {
         logs.removeAll()
-    }
-
-    func prepareForOfficialAPIMode() {
-        setOfficialAPIMode(true)
-    }
-
-    fileprivate func setOfficialAPIMode(_ enabled: Bool) {
-        guard enabled != isOfficialAPIMode else { return }
-        isOfficialAPIMode = enabled
-        guard enabled else {
-            appendLog("已退出官方 API 模式，可继续使用网页自动化。", category: .system)
-            return
-        }
-
-        cancelPendingAutoSubmit()
-        cancelCaptchaWatch()
-        cancelScheduledBatch(logCancellation: false)
-        clearPendingScheduledBatch()
-        if let runID = parallelRunID,
-           let script = AutomationScript.cancelParallel(runID: runID) {
-            webView?.evaluateJavaScript(script)
-        }
-        if isQueueRunning {
-            stopQueue(message: "已切换到官方 API 模式，网页批量任务已停止。", showNotice: false)
-        }
-        isWaitingToSubmit = false
-        hasAutoSubmittedCurrentForm = false
-        appendLog("已启用官方 API 模式，网页自动填写和网页提交已停用。", category: .system)
     }
 
     func shutdown() {
@@ -440,11 +411,6 @@ final class SurveyWebController: ObservableObject {
                     return
                 }
 
-                guard !self.isOfficialAPIMode else {
-                    self.appendLog("已切换到官方 API 模式，本次网页自动提交已取消。", level: .warning, category: .submit)
-                    return
-                }
-
                 self.scheduleAutoSubmit(
                     showScheduledNotice: !silent,
                     delaySeconds: submitDelaySeconds
@@ -470,10 +436,6 @@ final class SurveyWebController: ObservableObject {
         presets: [SubmissionPreset],
         surveyURL: URL
     ) {
-        guard !isOfficialAPIMode else {
-            appendLog("官方 API 模式已开启，未启动网页同步填写。", level: .warning, category: .batch)
-            return
-        }
         guard !isBusy else { return }
         guard let webView else {
             appendLog("同步填写启动失败：问卷页面尚未加载。", level: .error, category: .batch)
@@ -609,56 +571,8 @@ final class SurveyWebController: ObservableObject {
         stopQueue(message: "批量任务已由用户停止。", showNotice: true)
     }
 
-    // MARK: - 同步提交自检
-    //
-    // 同步提交只是把多页各自的“点自己页面上的提交按钮”安排在同一时刻，
-    // 不合并、不代发任何请求，所以每一页都要先自己确认状态可提交。
-
-    /// 返回 nil 表示这一页可以立刻提交；否则给出应当跳过的原因。
-    var syncSubmitBlockReason: String? {
-        if isOfficialAPIMode {
-            return "官方 API 模式已开启"
-        }
-        if isAwaitingCaptchaCompletion {
-            return "正在等待你手动完成人机验证"
-        }
-        switch state {
-        case .loading:
-            return "页面仍在加载"
-        case .submitted:
-            return "本页已经提交过"
-        case .closed:
-            return "问卷当前不可提交"
-        case .captchaRequired:
-            return "需要先手动完成人机验证"
-        case .failed(let message):
-            return message.isEmpty ? "页面状态异常" : message
-        case .ready(let questionCount):
-            if questionCount <= 0 {
-                return "页面还没有识别到题目"
-            }
-            if isSubmitting || isWaitingToSubmit {
-                return "本页正在提交中"
-            }
-            if isBusy {
-                return "本页正忙"
-            }
-            if !hasFilledCurrentForm {
-                return "本页还没有填写内容"
-            }
-            if !canAttemptSubmit {
-                return "本页暂时不能提交"
-            }
-            return nil
-        }
-    }
-
-    func noteSyncSubmitSkipped(reason: String) {
-        appendLog("同步提交跳过本页：\(reason)", level: .warning, category: .submit)
-    }
-
     func submitOnce(showScheduledNotice: Bool = true, source: String = "手动提交") {
-        guard !isOfficialAPIMode, !isBusy else { return }
+        guard !isBusy else { return }
         resetQueueSummary()
         guard let webView else {
             appendLog("\(source)失败：问卷页面尚未加载。", level: .error, category: .submit)
@@ -2088,7 +2002,6 @@ struct SurveyWebView: UIViewRepresentable {
     let submitDelaySeconds: Int
     let isSelected: Bool
     let initialLoadDelaySeconds: TimeInterval
-    let officialAPIModeEnabled: Bool
     let requestHeaderProfiles: [RequestHeaderProfile]
 
     private static let sharedProcessPool = WKProcessPool()
@@ -2116,7 +2029,6 @@ struct SurveyWebView: UIViewRepresentable {
 #endif
 
         controller.webView = webView
-        controller.setOfficialAPIMode(officialAPIModeEnabled)
         controller.setRequestHeaderProfiles(requestHeaderProfiles)
         controller.setPageSelected(isSelected)
         context.coordinator.updateRequestHeaderConfiguration(
@@ -2133,7 +2045,6 @@ struct SurveyWebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         controller.webView = webView
-        controller.setOfficialAPIMode(officialAPIModeEnabled)
         controller.setRequestHeaderProfiles(requestHeaderProfiles)
         controller.setPageSelected(isSelected)
         context.coordinator.updateRequestHeaderConfiguration(

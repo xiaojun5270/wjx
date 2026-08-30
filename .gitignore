@@ -9,7 +9,3 @@ dist/
 xcuserdata/
 *.xccheckout
 *.moved-aside
-.env
-.env.*
-!.env.example
-node_modules/

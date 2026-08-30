@@ -6,13 +6,8 @@ struct ContentView: View {
     @StateObject private var store: RuleStore
     @StateObject private var workspace: SurveyWorkspace
     @StateObject private var refreshScheduler = ScheduledPageRefreshScheduler()
-    @StateObject private var apiController = WJXAPIBatchController()
     @State private var workspaceNotice: UserNotice?
     @State private var showingScheduledRefresh = false
-    @State private var syncSubmitPlan: SurveyWorkspace.SyncSubmitPlan?
-    @State private var showingSyncSubmitConfirm = false
-    @State private var showingAPISubmitConfirm = false
-    @State private var showingAPILogs = false
 
     init() {
         let store = RuleStore()
@@ -32,7 +27,7 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { proxy in
             let isCompact = proxy.size.width < 700
-            let compactWidth = min(max(proxy.size.width * 0.23, 88), 104)
+            let compactWidth = min(max(proxy.size.width * 0.30, 116), 128)
 
             HStack(spacing: 0) {
                 pageSidebar(isCompact: isCompact)
@@ -54,53 +49,10 @@ struct ContentView: View {
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $showingAPILogs) {
-            WJXAPILogView(controller: apiController)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-        }
-        .confirmationDialog(
-            "同步提交",
-            isPresented: $showingSyncSubmitConfirm,
-            titleVisibility: .visible
-        ) {
-            if let plan = syncSubmitPlan, !plan.isEmpty {
-                Button("同时提交 \(plan.readyPageIDs.count) 个页面") {
-                    performSyncSubmit(plan)
-                }
-            }
-            Button("取消", role: .cancel) {
-                syncSubmitPlan = nil
-            }
-        } message: {
-            Text(syncSubmitConfirmMessage)
-        }
-        .confirmationDialog(
-            "官方 API 批量提交",
-            isPresented: $showingAPISubmitConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("通过 API 提交 10 组") {
-                performOfficialAPISubmit()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text(officialAPIConfirmMessage)
-        }
         .onChange(of: refreshScheduler.firedTarget) { target in
             guard let target else { return }
             performScheduledRefresh(target: target)
             refreshScheduler.consumeFiredTarget(target)
-        }
-        .onChange(of: store.officialAPISettings.isEnabled) { isEnabled in
-            guard isEnabled else { return }
-            workspace.setSyncSubmitEnabled(false)
-            workspace.pages.forEach { $0.controller.prepareForOfficialAPIMode() }
-        }
-        .onAppear {
-            guard store.officialAPISettings.isEnabled else { return }
-            workspace.setSyncSubmitEnabled(false)
-            workspace.pages.forEach { $0.controller.prepareForOfficialAPIMode() }
         }
     }
 
@@ -112,6 +64,12 @@ struct ContentView: View {
                     store: store,
                     isSelected: workspace.selectedPageID == page.id,
                     hasNextPage: workspace.hasNextPage(after: page.id),
+                    isScheduledRefreshActive: refreshScheduler.targetDate != nil,
+                    onReloadAllPages: reloadAllPages,
+                    onShowScheduledRefresh: {
+                        showingScheduledRefresh = true
+                    },
+                    onAddPage: addPage,
                     onSynchronizeSurveyURL: { value in
                         workspace.synchronizeSurveyURL(value)
                     },
@@ -132,121 +90,20 @@ struct ContentView: View {
 
     private func pageSidebar(isCompact: Bool) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: isCompact ? 2 : 8) {
-                if !isCompact {
+            if !isCompact {
+                HStack {
                     Text("页面")
                         .font(.title3.weight(.semibold))
                     Spacer()
-                } else {
-                    Spacer(minLength: 0)
+                    Text("\(workspace.pages.count)")
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
 
-                Button {
-                    reloadAllPages()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: isCompact ? 22 : 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("刷新所有页面")
-                .help("刷新所有已打开页面")
-
-                Button {
-                    showingScheduledRefresh = true
-                } label: {
-                    Image(
-                        systemName: refreshScheduler.targetDate == nil
-                            ? "clock"
-                            : "clock.fill"
-                    )
-                    .frame(width: isCompact ? 22 : 28, height: 28)
-                    .foregroundStyle(
-                        refreshScheduler.targetDate == nil
-                            ? Color.accentColor
-                            : Color.orange
-                    )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(
-                    refreshScheduler.targetDate == nil
-                        ? "设置定时刷新"
-                        : "查看定时刷新"
-                )
-                .help("设置到点刷新所有页面")
-
-                Button(action: addPage) {
-                    Image(systemName: "plus")
-                        .frame(width: isCompact ? 22 : 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("新增页面")
-                .help("新增页面并沿用当前配置")
-
-                if isCompact {
-                    Spacer(minLength: 0)
-                }
+                Divider()
             }
-            .padding(.horizontal, isCompact ? 5 : 12)
-            .padding(.vertical, 9)
-
-            Divider()
-
-            Button {
-                showingScheduledRefresh = true
-            } label: {
-                HStack(spacing: isCompact ? 4 : 7) {
-                    Image(
-                        systemName: refreshScheduler.targetDate == nil
-                            ? "clock"
-                            : "clock.fill"
-                    )
-                    .font(.caption)
-
-                    if isCompact {
-                        Text(
-                            refreshScheduler.targetDate == nil
-                                ? "定时"
-                                : scheduledRefreshCountdown
-                        )
-                        .font(
-                            refreshScheduler.targetDate == nil
-                                ? Font.caption.weight(.semibold)
-                                : Font.caption2.monospacedDigit().weight(.semibold)
-                        )
-                    } else {
-                        Text("定时刷新")
-                            .font(.caption.weight(.semibold))
-                        Spacer(minLength: 0)
-                        Text(
-                            refreshScheduler.targetDate == nil
-                                ? "设置"
-                                : scheduledRefreshCountdown
-                        )
-                        .font(.caption.monospacedDigit())
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.semibold))
-                    }
-                }
-                .foregroundStyle(
-                    refreshScheduler.targetDate == nil
-                        ? Color.primary
-                        : Color.orange
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, isCompact ? 7 : 12)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.plain)
-
-            Divider()
-
-            if store.officialAPISettings.isEnabled {
-                officialAPIControls(isCompact: isCompact)
-            } else {
-                syncSubmitControls(isCompact: isCompact)
-            }
-
-            Divider()
 
             List {
                 ForEach(workspace.pages) { page in
@@ -282,7 +139,7 @@ struct ContentView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, isCompact ? 54 : 58)
+            .environment(\.defaultMinListRowHeight, 58)
 
             Divider()
             HStack {
@@ -336,252 +193,6 @@ struct ContentView: View {
         }
     }
 
-    /// 同步提交：各页面先各自填好停住，由用户一次性触发，每页仍然点击自己页面的提交按钮。
-    private func syncSubmitControls(isCompact: Bool) -> some View {
-        let modeTitle: String = isCompact ? "同步" : "同步提交模式"
-        let modeStateText: String = workspace.isSyncSubmitEnabled ? "开" : "关"
-        let submitTitle: String = isCompact ? "提交" : "全部同步提交"
-
-        return VStack(spacing: 0) {
-            Button {
-                workspace.setSyncSubmitEnabled(!workspace.isSyncSubmitEnabled)
-            } label: {
-                HStack(spacing: isCompact ? 4 : 7) {
-                    Image(
-                        systemName: workspace.isSyncSubmitEnabled
-                            ? "checkmark.circle.fill"
-                            : "circle"
-                    )
-                    .font(.caption)
-
-                    Text(modeTitle)
-                        .font(.caption.weight(.semibold))
-
-                    if !isCompact {
-                        Spacer(minLength: 0)
-                        Text(modeStateText)
-                            .font(.caption)
-                    }
-                }
-                .foregroundStyle(
-                    workspace.isSyncSubmitEnabled ? Color.orange : Color.primary
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, isCompact ? 7 : 12)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.plain)
-            .help("打开后各页面只填写不提交，等你手动一次性触发")
-
-            Button(action: prepareSyncSubmit) {
-                HStack(spacing: isCompact ? 3 : 6) {
-                    Image(systemName: "paperplane.fill")
-                        .font(.caption)
-                    Text(submitTitle)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .tint(.orange)
-            .padding(.horizontal, isCompact ? 6 : 12)
-            .padding(.bottom, 9)
-            .accessibilityLabel("同时提交所有已填好的页面")
-        }
-    }
-
-    private func officialAPIControls(isCompact: Bool) -> some View {
-        VStack(spacing: 0) {
-            Button {
-                showingAPILogs = true
-            } label: {
-                HStack(spacing: isCompact ? 4 : 7) {
-                    Image(systemName: officialAPIStatusIcon)
-                        .font(.caption)
-                    Text(isCompact ? "API" : officialAPIStatusTitle)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                    if !isCompact {
-                        Spacer(minLength: 0)
-                        Image(systemName: "list.bullet.rectangle")
-                            .font(.caption)
-                    }
-                }
-                .foregroundStyle(officialAPIStatusColor)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, isCompact ? 7 : 12)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.plain)
-            .help("查看 API 运行日志")
-
-            Button(action: prepareOfficialAPISubmit) {
-                HStack(spacing: isCompact ? 3 : 6) {
-                    if apiController.isSubmitting {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "paperplane.fill")
-                            .font(.caption)
-                    }
-                    Text(isCompact ? "提交" : "API 提交 10 组")
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .tint(.blue)
-            .disabled(apiController.isSubmitting)
-            .padding(.horizontal, isCompact ? 6 : 12)
-            .padding(.bottom, 9)
-            .accessibilityLabel("通过官方 API 提交 10 组预设")
-        }
-    }
-
-    private var officialAPIStatusTitle: String {
-        switch apiController.state {
-        case .idle:
-            return store.isOfficialAPIReady ? "官方 API 已就绪" : "API 配置不完整"
-        case .submitting(let total):
-            return "API 正在提交 \(total) 组"
-        case .completed(let summary):
-            return "API 成功 \(summary.succeeded) · 失败 \(summary.failed)"
-        case .failed:
-            return "API 提交失败"
-        }
-    }
-
-    private var officialAPIStatusIcon: String {
-        switch apiController.state {
-        case .submitting: return "arrow.triangle.2.circlepath"
-        case .completed(let summary):
-            return summary.failed == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-        case .failed: return "xmark.octagon.fill"
-        case .idle:
-            return store.isOfficialAPIReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-        }
-    }
-
-    private var officialAPIStatusColor: Color {
-        switch apiController.state {
-        case .submitting: return .blue
-        case .completed(let summary): return summary.failed == 0 ? .green : .orange
-        case .failed: return .red
-        case .idle: return store.isOfficialAPIReady ? .green : .orange
-        }
-    }
-
-    private var officialAPIConfirmMessage: String {
-        let vid = store.officialAPISettings.surveyID
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return "将通过你的安全网关向问卷 vid=\(vid) 提交 10 组预设。此操作不点击网页，也不会使用网页验证码。请确认这是你有权测试的问卷。"
-    }
-
-    private func prepareOfficialAPISubmit() {
-        guard !apiController.isSubmitting else { return }
-        guard store.officialAPISettings.isEnabled else {
-            workspaceNotice = UserNotice(title: "API 模式未开启", message: "请先在“问卷与预设 → API”中开启官方 API 模式。")
-            return
-        }
-        if let message = store.officialAPIValidationMessage {
-            workspaceNotice = UserNotice(title: "API 配置不完整", message: message)
-            return
-        }
-        showingAPISubmitConfirm = true
-    }
-
-    private func performOfficialAPISubmit() {
-        apiController.submit(
-            presets: store.queuePresets,
-            settings: store.officialAPISettings,
-            accessToken: store.officialAPIAccessToken
-        ) { result in
-            switch result {
-            case .success(let summary):
-                self.workspaceNotice = UserNotice(
-                    title: summary.failed == 0 ? "API 提交完成" : "API 提交部分失败",
-                    message: summary.message + "请在 API 日志中查看每组结果。"
-                )
-            case .failure(let error):
-                self.workspaceNotice = UserNotice(
-                    title: "API 提交失败",
-                    message: error.localizedDescription
-                )
-            }
-        }
-    }
-
-    private var syncSubmitConfirmMessage: String {
-        guard let plan = syncSubmitPlan else { return "" }
-        var lines: [String] = []
-        let numbers = plan.readyPageNumbers.map(String.init).joined(separator: "、")
-        lines.append("将同时提交页面 \(numbers)，每个页面各自点击自己的提交按钮。")
-        if let detail = skippedPagesDetail(plan) {
-            lines.append(detail)
-        }
-        if !workspace.isSyncSubmitEnabled {
-            lines.append("同步提交模式未开启，页面可能会在填好后自行提交。")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private func skippedPagesDetail(_ plan: SurveyWorkspace.SyncSubmitPlan) -> String? {
-        guard !plan.skipped.isEmpty else { return nil }
-        let detail = plan.skipped
-            .map { "页面 \($0.pageNumber)：\($0.reason)" }
-            .joined(separator: "；")
-        return "跳过 \(plan.skipped.count) 个页面 —— \(detail)。"
-    }
-
-    private func prepareSyncSubmit() {
-        let plan = workspace.syncSubmitPlan()
-        guard !plan.isEmpty else {
-            syncSubmitPlan = nil
-            var message = "当前没有页面处于填好待提交的状态。"
-            if let detail = skippedPagesDetail(plan) {
-                message += "\n\(detail)"
-            }
-            workspaceNotice = UserNotice(title: "暂时无法同步提交", message: message)
-            return
-        }
-        syncSubmitPlan = plan
-        showingSyncSubmitConfirm = true
-    }
-
-    private func performSyncSubmit(_ plan: SurveyWorkspace.SyncSubmitPlan) {
-        let submittedNumbers = workspace.submitPagesTogether(plan)
-        syncSubmitPlan = nil
-
-        let notice: UserNotice
-        if submittedNumbers.isEmpty {
-            notice = UserNotice(
-                title: "没有页面被提交",
-                message: "触发时所有页面都不处于可提交状态，详情见各页面日志。"
-            )
-        } else {
-            let numbers = submittedNumbers.map(String.init).joined(separator: "、")
-            var message = "已同时触发页面 \(numbers) 的提交，请留意各页面结果。"
-            if !plan.skipped.isEmpty {
-                message += "跳过了 \(plan.skipped.count) 个未就绪页面。"
-            }
-            message += "如果某个页面弹出人机验证，请在该页面手动完成。"
-            notice = UserNotice(title: "已触发同步提交", message: message)
-        }
-
-        // 等确认弹窗收起后再弹提示，避免两个 presentation 冲突。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            self.workspaceNotice = notice
-        }
-    }
-
     private func performScheduledRefresh(target: Date) {
         let lateness = Date().timeIntervalSince(target)
         guard UIApplication.shared.applicationState == .active,
@@ -594,16 +205,6 @@ struct ContentView: View {
             return
         }
         reloadAllPages()
-    }
-
-    private var scheduledRefreshCountdown: String {
-        let total = max(refreshScheduler.remainingSeconds, 0)
-        let days = total / 86_400
-        let hours = (total % 86_400) / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        let clock = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        return days > 0 ? "\(days)天 \(clock)" : clock
     }
 
     private func presetName(for page: SurveyPageSession) -> String {
@@ -819,36 +420,41 @@ private struct SurveyPageSidebarRow: View {
     }
 
     var body: some View {
-        HStack(spacing: isCompact ? 7 : 10) {
+        HStack(spacing: isCompact ? 5 : 10) {
             ZStack {
                 Circle()
                     .fill(statusColor.opacity(0.18))
-                    .frame(width: isCompact ? 15 : 17, height: isCompact ? 15 : 17)
+                    .frame(width: isCompact ? 14 : 17, height: isCompact ? 14 : 17)
                 Circle()
                     .fill(statusColor)
-                    .frame(width: isCompact ? 7 : 8, height: isCompact ? 7 : 8)
+                    .frame(width: isCompact ? 6 : 8, height: isCompact ? 6 : 8)
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(isCompact ? "页 \(page.pageNumber)" : page.title)
-                    .font((isCompact ? Font.caption : Font.subheadline).weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                    .allowsTightening(true)
                 Text(isCompact ? presetName : "\(presetName) · \(page.surveyURL?.host ?? "地址未设置")")
                     .font(isCompact ? .caption2 : .caption)
                     .foregroundStyle(isSelected ? Color.accentColor.opacity(0.72) : Color.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                    .allowsTightening(true)
             }
+            .layoutPriority(1)
 
-            Spacer(minLength: isCompact ? 1 : 4)
+            Spacer(minLength: isCompact ? 0 : 4)
 
-            if isSelected {
+            if isSelected && !isCompact {
                 Image(systemName: "chevron.right")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(Color.accentColor)
             }
         }
-        .padding(.horizontal, isCompact ? 8 : 11)
+        .padding(.horizontal, isCompact ? 6 : 11)
         .padding(.vertical, isCompact ? 7 : 8)
         .frame(minHeight: isCompact ? 54 : 58)
         .background {
@@ -912,6 +518,10 @@ private struct SurveyPageView: View {
     @ObservedObject private var webController: SurveyWebController
     let isSelected: Bool
     let hasNextPage: Bool
+    let isScheduledRefreshActive: Bool
+    let onReloadAllPages: () -> Void
+    let onShowScheduledRefresh: () -> Void
+    let onAddPage: () -> Void
     let onSynchronizeSurveyURL: (String) -> Void
     let onNextPage: () -> Void
     let onSubmissionCompleted: () -> Void
@@ -923,6 +533,10 @@ private struct SurveyPageView: View {
         store: RuleStore,
         isSelected: Bool,
         hasNextPage: Bool,
+        isScheduledRefreshActive: Bool,
+        onReloadAllPages: @escaping () -> Void,
+        onShowScheduledRefresh: @escaping () -> Void,
+        onAddPage: @escaping () -> Void,
         onSynchronizeSurveyURL: @escaping (String) -> Void,
         onNextPage: @escaping () -> Void,
         onSubmissionCompleted: @escaping () -> Void
@@ -932,6 +546,10 @@ private struct SurveyPageView: View {
         _webController = ObservedObject(wrappedValue: session.controller)
         self.isSelected = isSelected
         self.hasNextPage = hasNextPage
+        self.isScheduledRefreshActive = isScheduledRefreshActive
+        self.onReloadAllPages = onReloadAllPages
+        self.onShowScheduledRefresh = onShowScheduledRefresh
+        self.onAddPage = onAddPage
         self.onSynchronizeSurveyURL = onSynchronizeSurveyURL
         self.onNextPage = onNextPage
         self.onSubmissionCompleted = onSubmissionCompleted
@@ -953,7 +571,6 @@ private struct SurveyPageView: View {
                             submitDelaySeconds: session.submitDelaySeconds,
                             isSelected: isSelected,
                             initialLoadDelaySeconds: 0,
-                            officialAPIModeEnabled: store.officialAPISettings.isEnabled,
                             requestHeaderProfiles: store.requestHeaderProfiles
                         )
                     }
@@ -1039,39 +656,36 @@ private struct SurveyPageView: View {
     @ToolbarContentBuilder
     private var browserToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .navigationBarLeading) {
-            Button {
-                webController.goBack()
-            } label: {
-                Image(systemName: "chevron.left")
+            if webController.canGoBack {
+                Button {
+                    webController.goBack()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .disabled(webController.isBusy)
+                .help("返回")
             }
-            .disabled(!webController.canGoBack || webController.isBusy)
-            .help("返回")
         }
 
         ToolbarItemGroup(placement: .navigationBarTrailing) {
-            Button {
-                guard let url = session.surveyURL else { return }
-                webController.reopenSurvey(url)
-            } label: {
+            Button(action: onReloadAllPages) {
                 Image(systemName: "arrow.clockwise")
             }
-            .disabled(session.surveyURL == nil || webController.isBusy)
-            .help("按保存地址重新打开")
+            .accessibilityLabel("刷新所有页面")
+            .help("按各自保存地址刷新所有页面")
 
-            Button {
-                showingLogs = true
-            } label: {
-                Image(systemName: "list.bullet.rectangle")
+            Button(action: onShowScheduledRefresh) {
+                Image(systemName: isScheduledRefreshActive ? "clock.fill" : "clock")
+                    .foregroundStyle(isScheduledRefreshActive ? Color.orange : Color.accentColor)
             }
-            .help("运行日志")
+            .accessibilityLabel(isScheduledRefreshActive ? "查看定时刷新" : "设置定时刷新")
+            .help("设置到点刷新所有页面")
 
-            Button {
-                showingRules = true
-            } label: {
-                Image(systemName: "slider.horizontal.3")
+            Button(action: onAddPage) {
+                Image(systemName: "plus")
             }
-            .disabled(webController.isBusy)
-            .help("问卷与预设")
+            .accessibilityLabel("新增页面")
+            .help("新增页面并沿用当前配置")
         }
     }
 
@@ -1108,6 +722,8 @@ private struct SurveyPageView: View {
                         .font(.caption.monospacedDigit().weight(.medium))
                         .foregroundStyle(.secondary)
                 }
+
+                pageOptionsMenu
             }
 
             if webController.isQueueRunning {
@@ -1124,6 +740,29 @@ private struct SurveyPageView: View {
         .frame(maxWidth: .infinity)
         .background(Color(uiColor: .systemBackground))
         .animation(.easeInOut(duration: 0.2), value: webController.queueSnapshot.progress)
+    }
+
+    private var pageOptionsMenu: some View {
+        Menu {
+            Button {
+                showingLogs = true
+            } label: {
+                Label("运行日志", systemImage: "list.bullet.rectangle")
+            }
+
+            Button {
+                showingRules = true
+            } label: {
+                Label("问卷与预设", systemImage: "slider.horizontal.3")
+            }
+            .disabled(webController.isBusy)
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 30, height: 30)
+        }
+        .accessibilityLabel("运行日志与问卷设置")
+        .help("运行日志与问卷设置")
     }
 
     /// 人机验证只能由用户亲手完成，这里只给出提示与「已完成」入口，不做任何绕过。
@@ -1350,86 +989,6 @@ private struct SurveyPageView: View {
         }
     }
 
-}
-
-private struct WJXAPILogView: View {
-    @ObservedObject var controller: WJXAPIBatchController
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if controller.logs.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "network")
-                            .font(.system(size: 30, weight: .light))
-                            .foregroundStyle(.secondary)
-                        Text("暂无 API 日志")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(controller.logs.reversed()) { entry in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: iconName(for: entry.level))
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(color(for: entry.level))
-                                .frame(width: 22, height: 22)
-
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(entry.timestamp.formatted(date: .omitted, time: .standard))
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                Text(entry.message)
-                                    .font(.subheadline)
-                                    .textSelection(.enabled)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .listStyle(.plain)
-                }
-            }
-            .navigationTitle("API 运行日志")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
-                }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    ShareLink(item: controller.logExportText) {
-                        Image(systemName: "square.and.arrow.up")
-                    }
-                    .disabled(controller.logs.isEmpty)
-                    Button(role: .destructive) {
-                        controller.clearLogs()
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .disabled(controller.logs.isEmpty)
-                }
-            }
-        }
-    }
-
-    private func iconName(for level: AutomationLogLevel) -> String {
-        switch level {
-        case .info: return "info.circle.fill"
-        case .success: return "checkmark.circle.fill"
-        case .warning: return "exclamationmark.triangle.fill"
-        case .error: return "xmark.octagon.fill"
-        }
-    }
-
-    private func color(for level: AutomationLogLevel) -> Color {
-        switch level {
-        case .info: return .blue
-        case .success: return .green
-        case .warning: return .orange
-        case .error: return .red
-        }
-    }
 }
 
 private struct AutomationLogView: View {

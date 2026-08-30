@@ -1,6 +1,18 @@
 import Foundation
 import Security
 
+enum LegacyRemovedFeatureCleanup {
+    static func removeOfficialAPIData(defaults: UserDefaults) {
+        defaults.removeObject(forKey: "officialAPISettings.v1")
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.example.WJXAutoFill.official-api",
+            kSecAttrAccount as String: "gateway-access-token"
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
 enum RequestHeaderAction: String, Codable, CaseIterable, Identifiable, Hashable {
     case add
     case modify
