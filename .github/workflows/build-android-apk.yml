@@ -1,0 +1,88 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp build/app/outputs/flutter-apk/app-release.apk "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk"
+          sha256sum "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk" \
+            | tee "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WJXAutoFill-Android-${{ github.run_number }}
+          path: |
+            WJXAutoFill-${{ github.run_number }}.apk
+            WJXAutoFill-${{ github.run_number }}.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish prerelease asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="android-${GITHUB_RUN_NUMBER}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk" \
+              "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk.sha256" \
+              --clobber
+            exit 0
+          fi
+          gh release create "$TAG" \
+            "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk" \
+            "WJXAutoFill-${GITHUB_RUN_NUMBER}.apk.sha256" \
+            --title "Android APK build ${GITHUB_RUN_NUMBER}" \
+            --notes "Installable Android release build from commit ${GITHUB_SHA}." \
+            --prerelease \
+            --target "${GITHUB_SHA}"

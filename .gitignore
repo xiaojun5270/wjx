@@ -9,3 +9,11 @@ dist/
 xcuserdata/
 *.xccheckout
 *.moved-aside
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea/
+.flutter_scaffold/
+.packages
+android/.gradle/
+android/local.properties
