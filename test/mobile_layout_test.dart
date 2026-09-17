@@ -24,6 +24,7 @@ void main() {
     expect(find.text('问卷地址无效'), findsOneWidget);
     expect(find.byTooltip('新增页面'), findsOneWidget);
     expect(find.byTooltip('问卷与预设'), findsNWidgets(2));
+    expect(find.text('1 个 · Blocal'), findsOneWidget);
     expect(
       tester.getSize(find.byKey(const ValueKey('page-sidebar'))).width,
       closeTo(85.8, .1),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_store.dart';
+import 'build_info.dart';
 import 'models.dart';
 
 enum _SettingsPage { survey, preset, batch, headers }
@@ -41,13 +42,28 @@ class _SettingsSheetState extends State<SettingsSheet> {
       builder: (context, _) => Column(
         children: [
           SizedBox(
-            height: 44,
+            height: 52,
             child: Stack(
               alignment: Alignment.center,
               children: [
-                const Text(
-                  '问卷与预设',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      '问卷与预设',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      appBuildLabel,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Colors.black45,
+                      ),
+                    ),
+                  ],
                 ),
                 Positioned(
                   right: 8,

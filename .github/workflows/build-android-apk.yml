@@ -36,6 +36,29 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Restore Android test signing key
+        id: android-signing-key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: wjx-android-debug-keystore-v1
+
+      - name: Create Android test signing key
+        if: steps.android-signing-key.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -dname "CN=WJX Auto Fill Test,O=xiaojun5270,C=CN" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000
+
       - name: Install dependencies
         run: flutter pub get
 
@@ -46,7 +69,11 @@ jobs:
         run: flutter test
 
       - name: Build release APK
-        run: flutter build apk --release
+        run: >-
+          flutter build apk --release
+          --build-name "1.0.${GITHUB_RUN_NUMBER}"
+          --build-number "${GITHUB_RUN_NUMBER}"
+          --dart-define "APP_BUILD_NUMBER=${GITHUB_RUN_NUMBER}"
 
       - name: Package artifact
         shell: bash

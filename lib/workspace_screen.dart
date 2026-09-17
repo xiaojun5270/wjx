@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'app_store.dart';
+import 'build_info.dart';
 import 'logs_sheet.dart';
 import 'models.dart';
 import 'settings_sheet.dart';
@@ -288,7 +289,7 @@ class _PageSidebar extends StatelessWidget {
                           ),
                           const SizedBox(width: 2),
                           Text(
-                            '${store.pages.length} 个',
+                            '${store.pages.length} 个 · B$appBuildNumber',
                             style: const TextStyle(
                               fontSize: 10,
                               color: Colors.black54,
@@ -310,6 +311,14 @@ class _PageSidebar extends StatelessWidget {
                     style: const TextStyle(
                       fontSize: 12,
                       color: Colors.black54,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'B$appBuildNumber',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Color(0xFF007AFF),
                     ),
                   ),
                   const Spacer(),
