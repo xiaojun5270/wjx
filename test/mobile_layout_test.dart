@@ -23,10 +23,19 @@ void main() {
 
     expect(find.text('问卷地址无效'), findsOneWidget);
     expect(find.byTooltip('新增页面'), findsOneWidget);
+    expect(find.byTooltip('问卷与预设'), findsNWidgets(2));
     expect(
       tester.getSize(find.byKey(const ValueKey('page-sidebar'))).width,
       closeTo(85.8, .1),
     );
+    expect(tester.getRect(find.text('下一页')).center.dy, greaterThan(760));
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.byKey(const ValueKey('sidebar-settings')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('问卷与预设'), findsWidgets);
+    expect(find.text('自动流程'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());

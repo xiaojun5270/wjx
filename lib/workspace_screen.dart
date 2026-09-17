@@ -106,39 +106,44 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                 : 210.0;
             return Scaffold(
               body: SafeArea(
-                child: Row(
-                  children: [
-                    SizedBox(
-                      key: const ValueKey('page-sidebar'),
-                      width: sidebarWidth,
-                      child: _PageSidebar(
-                        store: store,
-                        controllers: _controllers,
-                        compact: compact,
-                      ),
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(
-                      child: IndexedStack(
-                        index: store.pages.indexWhere(
-                          (page) => page.id == store.selectedPageId,
+                child: SizedBox.expand(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      SizedBox(
+                        key: const ValueKey('page-sidebar'),
+                        width: sidebarWidth,
+                        child: _PageSidebar(
+                          store: store,
+                          controllers: _controllers,
+                          compact: compact,
+                          onSettings: _showSelectedSettings,
                         ),
-                        children: [
-                          for (final page in store.pages)
-                            SurveyPagePane(
-                              key: ValueKey(page.id),
-                              store: store,
-                              page: page,
-                              controller: _controllers[page.id]!,
-                              onReloadAll: _reloadAll,
-                              onSchedule: _showScheduleSheet,
-                              onAddPage: store.addPage,
-                              onSettingsChanged: _reloadAll,
-                            ),
-                        ],
                       ),
-                    ),
-                  ],
+                      const VerticalDivider(width: 1),
+                      Expanded(
+                        child: IndexedStack(
+                          sizing: StackFit.expand,
+                          index: store.pages.indexWhere(
+                            (page) => page.id == store.selectedPageId,
+                          ),
+                          children: [
+                            for (final page in store.pages)
+                              SurveyPagePane(
+                                key: ValueKey(page.id),
+                                store: store,
+                                page: page,
+                                controller: _controllers[page.id]!,
+                                onReloadAll: _reloadAll,
+                                onSchedule: _showScheduleSheet,
+                                onAddPage: store.addPage,
+                                onSettingsChanged: _reloadAll,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             );
@@ -156,6 +161,34 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       builder: (context) => _ScheduleSheet(store: store),
     );
   }
+
+  Future<void> _showSelectedSettings() async {
+    final page = store.selectedPage;
+    final settings = SettingsSheet(store: store, page: page);
+    if (MediaQuery.sizeOf(context).width < 700) {
+      await Navigator.of(context, rootNavigator: true).push<void>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (context) => Scaffold(
+            backgroundColor: const Color(0xFFF2F2F7),
+            body: SafeArea(child: settings),
+          ),
+        ),
+      );
+    } else {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        builder: (context) => FractionallySizedBox(
+          heightFactor: .96,
+          child: settings,
+        ),
+      );
+    }
+    await _reloadAll();
+  }
 }
 
 class _PageSidebar extends StatelessWidget {
@@ -163,11 +196,13 @@ class _PageSidebar extends StatelessWidget {
     required this.store,
     required this.controllers,
     required this.compact,
+    required this.onSettings,
   });
 
   final AppStore store;
   final Map<String, SurveyController> controllers;
   final bool compact;
+  final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -239,15 +274,64 @@ class _PageSidebar extends StatelessWidget {
               vertical: 8,
             ),
             child: Row(
-              mainAxisAlignment:
-                  compact ? MainAxisAlignment.center : MainAxisAlignment.start,
               children: [
-                const Icon(Icons.layers_outlined,
-                    size: 17, color: Colors.black45),
-                const SizedBox(width: 6),
-                Text(
-                  '${store.pages.length} 个',
-                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                if (compact)
+                  Expanded(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.layers_outlined,
+                            size: 15,
+                            color: Colors.black45,
+                          ),
+                          const SizedBox(width: 2),
+                          Text(
+                            '${store.pages.length} 个',
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: Colors.black54,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (!compact) ...[
+                  const Icon(
+                    Icons.layers_outlined,
+                    size: 17,
+                    color: Colors.black45,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${store.pages.length} 个',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.black54,
+                    ),
+                  ),
+                  const Spacer(),
+                ],
+                IconButton(
+                  key: const ValueKey('sidebar-settings'),
+                  constraints: const BoxConstraints.tightFor(
+                    width: 24,
+                    height: 30,
+                  ),
+                  padding: EdgeInsets.zero,
+                  iconSize: compact ? 17 : 18,
+                  visualDensity: VisualDensity.compact,
+                  style: IconButton.styleFrom(
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    minimumSize: const Size(24, 30),
+                    padding: EdgeInsets.zero,
+                  ),
+                  color: const Color(0xFF007AFF),
+                  tooltip: '问卷与预设',
+                  onPressed: onSettings,
+                  icon: const Icon(Icons.tune),
                 ),
               ],
             ),
@@ -422,6 +506,11 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
       builder: (context, _) => Scaffold(
         backgroundColor: Colors.white,
         appBar: AppBar(
+          backgroundColor: Colors.white,
+          foregroundColor: const Color(0xFF1C1C1E),
+          surfaceTintColor: Colors.transparent,
+          iconTheme: const IconThemeData(color: Color(0xFF007AFF)),
+          actionsIconTheme: const IconThemeData(color: Color(0xFF007AFF)),
           leadingWidth: widget.controller.canGoBack ? 40 : 0,
           leading: widget.controller.canGoBack
               ? IconButton(
@@ -454,6 +543,11 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
               tooltip: '新增页面',
               onPressed: widget.onAddPage,
             ),
+            _CompactIconButton(
+              icon: Icons.tune,
+              tooltip: '问卷与预设',
+              onPressed: _showSettings,
+            ),
           ],
         ),
         body: validUri == null
@@ -481,7 +575,9 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           child: SafeArea(
             top: false,
-            child: Center(
+            child: Align(
+              alignment: Alignment.center,
+              heightFactor: 1,
               child: SizedBox(
                 width: 280,
                 height: 46,
@@ -503,20 +599,46 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
   }
 
   Future<void> _showSettings() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      showDragHandle: true,
-      builder: (context) => FractionallySizedBox(
-        heightFactor: .96,
-        child: SettingsSheet(store: widget.store, page: widget.page),
-      ),
-    );
+    final settings = SettingsSheet(store: widget.store, page: widget.page);
+    if (MediaQuery.sizeOf(context).width < 700) {
+      await Navigator.of(context, rootNavigator: true).push<void>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (context) => Scaffold(
+            backgroundColor: const Color(0xFFF2F2F7),
+            body: SafeArea(child: settings),
+          ),
+        ),
+      );
+    } else {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        showDragHandle: true,
+        builder: (context) => FractionallySizedBox(
+          heightFactor: .96,
+          child: settings,
+        ),
+      );
+    }
     await widget.onSettingsChanged();
   }
 
   void _showLogs() {
+    final logs = LogsSheet(controller: widget.controller);
+    if (MediaQuery.sizeOf(context).width < 700) {
+      Navigator.of(context, rootNavigator: true).push<void>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (context) => Scaffold(
+            backgroundColor: Colors.white,
+            body: SafeArea(child: logs),
+          ),
+        ),
+      );
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -524,7 +646,7 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
       showDragHandle: true,
       builder: (context) => FractionallySizedBox(
         heightFactor: .75,
-        child: LogsSheet(controller: widget.controller),
+        child: logs,
       ),
     );
   }
@@ -548,7 +670,7 @@ class _CompactIconButton extends StatelessWidget {
         constraints: const BoxConstraints.tightFor(width: 36, height: 44),
         padding: EdgeInsets.zero,
         iconSize: 21,
-        color: color,
+        color: color ?? const Color(0xFF007AFF),
         tooltip: tooltip,
         onPressed: onPressed,
         icon: Icon(icon),
