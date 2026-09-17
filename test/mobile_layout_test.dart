@@ -23,6 +23,10 @@ void main() {
 
     expect(find.text('问卷地址无效'), findsOneWidget);
     expect(find.byTooltip('新增页面'), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('page-sidebar'))).width,
+      closeTo(85.8, .1),
+    );
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());

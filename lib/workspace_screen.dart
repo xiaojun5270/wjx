@@ -102,13 +102,14 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           builder: (context, constraints) {
             final compact = constraints.maxWidth < 700;
             final sidebarWidth = compact
-                ? (constraints.maxWidth * .30).clamp(116.0, 128.0)
+                ? (constraints.maxWidth * .22).clamp(84.0, 104.0)
                 : 210.0;
             return Scaffold(
               body: SafeArea(
                 child: Row(
                   children: [
                     SizedBox(
+                      key: const ValueKey('page-sidebar'),
                       width: sidebarWidth,
                       child: _PageSidebar(
                         store: store,
@@ -196,7 +197,7 @@ class _PageSidebar extends StatelessWidget {
           Expanded(
             child: ListView.builder(
               padding: EdgeInsets.symmetric(
-                horizontal: compact ? 6 : 9,
+                horizontal: compact ? 4 : 9,
                 vertical: 4,
               ),
               itemCount: store.pages.length,
@@ -234,7 +235,7 @@ class _PageSidebar extends StatelessWidget {
           const Divider(height: 1),
           Padding(
             padding: EdgeInsets.symmetric(
-              horizontal: compact ? 6 : 12,
+              horizontal: compact ? 4 : 12,
               vertical: 8,
             ),
             child: Row(
@@ -299,32 +300,32 @@ class _SidebarRow extends StatelessWidget {
                 children: [
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
-                    width: 3,
-                    height: selected ? (compact ? 30 : 34) : 0,
+                    width: compact ? 2 : 3,
+                    height: selected ? (compact ? 28 : 34) : 0,
                     decoration: BoxDecoration(
                       color: const Color(0xFF007AFF),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                  SizedBox(width: compact ? 4 : 8),
+                  SizedBox(width: compact ? 3 : 8),
                   Container(
-                    width: compact ? 14 : 17,
-                    height: compact ? 14 : 17,
+                    width: compact ? 12 : 17,
+                    height: compact ? 12 : 17,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: statusColor.withOpacity(.18),
                     ),
                     alignment: Alignment.center,
                     child: Container(
-                      width: compact ? 6 : 8,
-                      height: compact ? 6 : 8,
+                      width: compact ? 5 : 8,
+                      height: compact ? 5 : 8,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: statusColor,
                       ),
                     ),
                   ),
-                  SizedBox(width: compact ? 5 : 9),
+                  SizedBox(width: compact ? 4 : 9),
                   Expanded(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -335,7 +336,7 @@ class _SidebarRow extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: 14,
+                            fontSize: compact ? 13 : 14,
                             fontWeight: FontWeight.w600,
                             color: selected
                                 ? const Color(0xFF007AFF)
@@ -350,7 +351,7 @@ class _SidebarRow extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: compact ? 10 : 12,
+                            fontSize: compact ? 9.5 : 12,
                             color: selected
                                 ? const Color(0xBB007AFF)
                                 : Colors.black45,
