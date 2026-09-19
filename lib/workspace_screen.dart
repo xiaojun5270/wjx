@@ -880,8 +880,13 @@ class _ScheduleSheetState extends State<_ScheduleSheet> {
   Widget build(BuildContext context) {
     final active = widget.store.scheduledRefresh;
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          0,
+          20,
+          20 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -901,10 +906,82 @@ class _ScheduleSheetState extends State<_ScheduleSheet> {
               ),
             ],
             const SizedBox(height: 18),
+            const Text(
+              '刷新日期',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.black54,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 7),
             OutlinedButton.icon(
-              onPressed: _pickDateTime,
+              key: const ValueKey('schedule-date-picker'),
+              onPressed: _pickDate,
               icon: const Icon(Icons.calendar_month_outlined),
-              label: Text(_dateText(selected)),
+              label: Text(_dateOnlyText(selected)),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    '刷新时间',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.black54,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                TextButton.icon(
+                  key: const ValueKey('schedule-next-hour'),
+                  onPressed: _selectNextWholeHour,
+                  icon: const Icon(Icons.update, size: 17),
+                  label: const Text('下一整点'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                Expanded(
+                  child: _TimeSelector(
+                    key: const ValueKey('schedule-hour-selector'),
+                    label: '小时',
+                    value: selected.hour,
+                    values: List<int>.generate(24, (index) => index),
+                    onChanged: _setHour,
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 8),
+                  child: Text(
+                    ':',
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Expanded(
+                  child: _TimeSelector(
+                    key: const ValueKey('schedule-minute-selector'),
+                    label: '分钟',
+                    value: selected.minute,
+                    values: List<int>.generate(60, (index) => index),
+                    onChanged: _setMinute,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '将在 ${_dateText(selected)} 刷新',
+              key: const ValueKey('schedule-selected-time'),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 13,
+                color: Color(0xFF007AFF),
+                fontWeight: FontWeight.w600,
+              ),
             ),
             const SizedBox(height: 10),
             FilledButton(
@@ -943,23 +1020,101 @@ class _ScheduleSheetState extends State<_ScheduleSheet> {
     );
   }
 
-  Future<void> _pickDateTime() async {
+  Future<void> _pickDate() async {
     final date = await showDatePicker(
       context: context,
-      firstDate: DateTime.now(),
+      firstDate: DateTime.now().copyWith(
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0,
+        microsecond: 0,
+      ),
       lastDate: DateTime.now().add(const Duration(days: 365)),
       initialDate: selected,
     );
     if (date == null || !mounted) return;
-    final time = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(selected),
-    );
-    if (time == null) return;
     setState(() {
-      selected =
-          DateTime(date.year, date.month, date.day, time.hour, time.minute);
+      selected = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        selected.hour,
+        selected.minute,
+      );
     });
+  }
+
+  void _setHour(int hour) {
+    setState(() {
+      selected = DateTime(
+        selected.year,
+        selected.month,
+        selected.day,
+        hour,
+        selected.minute,
+      );
+    });
+  }
+
+  void _setMinute(int minute) {
+    setState(() {
+      selected = DateTime(
+        selected.year,
+        selected.month,
+        selected.day,
+        selected.hour,
+        minute,
+      );
+    });
+  }
+
+  void _selectNextWholeHour() {
+    final now = DateTime.now();
+    setState(() {
+      selected = DateTime(now.year, now.month, now.day, now.hour + 1);
+    });
+  }
+}
+
+class _TimeSelector extends StatelessWidget {
+  const _TimeSelector({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.values,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final List<int> values;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<int>(
+      value: value,
+      isExpanded: true,
+      menuMaxHeight: 320,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(
+          label == '小时' ? Icons.schedule : Icons.more_time,
+          size: 19,
+        ),
+      ),
+      items: [
+        for (final item in values)
+          DropdownMenuItem<int>(
+            value: item,
+            child: Text(item.toString().padLeft(2, '0')),
+          ),
+      ],
+      onChanged: (nextValue) {
+        if (nextValue != null) onChanged(nextValue);
+      },
+    );
   }
 }
 
@@ -1006,6 +1161,9 @@ IconData _statusIcon(SurveyController controller) {
 String _dateText(DateTime date) =>
     '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')} '
     '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+
+String _dateOnlyText(DateTime date) =>
+    '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
 
 String _durationText(Duration duration) {
   final seconds = duration.inSeconds.clamp(0, 999999999).toInt();

@@ -43,31 +43,39 @@ class _SettingsSheetState extends State<SettingsSheet> {
         children: [
           SizedBox(
             height: 52,
-            child: Stack(
-              alignment: Alignment.center,
+            child: Row(
               children: [
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text(
-                      '问卷与预设',
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
+                const SizedBox(width: 72),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text(
+                        '问卷与预设',
+                        key: ValueKey('settings-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                    Text(
-                      appBuildLabel,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Colors.black45,
+                      Text(
+                        appBuildLabel,
+                        maxLines: 1,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Colors.black45,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-                Positioned(
-                  right: 8,
+                SizedBox(
+                  width: 72,
                   child: TextButton(
+                    key: const ValueKey('settings-done'),
                     onPressed: () => Navigator.pop(context),
                     child: const Text('完成'),
                   ),
