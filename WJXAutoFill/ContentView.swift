@@ -27,7 +27,8 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { proxy in
             let isCompact = proxy.size.width < 700
-            let compactWidth = min(max(proxy.size.width * 0.30, 116), 128)
+            // 收紧侧栏：紧凑态只占约 22%，夹在 84–98pt，避免右侧留大片空白。
+            let compactWidth = min(max(proxy.size.width * 0.22, 84), 98)
 
             HStack(spacing: 0) {
                 pageSidebar(isCompact: isCompact)
@@ -475,7 +476,7 @@ private struct SurveyPageSidebarRow: View {
         }
         .padding(.horizontal, isCompact ? 6 : 11)
         .padding(.vertical, isCompact ? 7 : 8)
-        .frame(minHeight: isCompact ? 54 : 58)
+        .frame(maxWidth: .infinity, minHeight: isCompact ? 52 : 58, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
@@ -591,7 +592,8 @@ private struct SurveyPageView: View {
                     )
                     .ignoresSafeArea(.container, edges: .bottom)
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        statusHeader
+                        // 性能：只有当前页渲染玻璃状态头，隐藏页(opacity 0)不做玻璃采样与状态刷新。
+                        if isSelected { statusHeader }
                     }
                 } else {
                     invalidURLView
@@ -599,7 +601,10 @@ private struct SurveyPageView: View {
             }
             .navigationTitle(session.title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { browserToolbar }
+            .toolbar {
+                // 性能：只有当前页构建工具栏按钮，隐藏页不参与工具栏布局。
+                if isSelected { browserToolbar }
+            }
             .sheet(isPresented: $showingRules) {
                 RuleEditorView(
                     store: store,
@@ -638,7 +643,8 @@ private struct SurveyPageView: View {
                 onSubmissionCompleted()
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                nextPageBar
+                // 性能：隐藏页不渲染「下一页」玻璃浮条，减少并行 10 页时的重复玻璃采样。
+                if isSelected { nextPageBar }
             }
         }
     }
