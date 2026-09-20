@@ -11,15 +11,29 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 20
+    runs-on: macos-26
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          XCODE_APP="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "$XCODE_APP" ]; then
+            echo "::error::runner 上找不到 Xcode 26；iOS 26 SDK 只在 macos-26 镜像上"
+            ls -d /Applications/Xcode_*.app || true
+            exit 1
+          fi
+          echo "使用 $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+
       - name: Show Xcode version
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
 
       - name: Build unsigned device app
         shell: bash
