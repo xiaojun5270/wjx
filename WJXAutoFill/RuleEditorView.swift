@@ -252,9 +252,8 @@ struct RuleEditorView: View {
             .tint(store.isParallelReady ? .green : .orange)
 
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(15)
+        .softCard(radius: 18, tint: store.isParallelReady ? .green : .orange)
     }
 
     private func batchPresetEditor(_ preset: SubmissionPreset) -> some View {
@@ -335,13 +334,8 @@ struct RuleEditorView: View {
                 contentType: .emailAddress
             )
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(statusColor(for: preset).opacity(0.18), lineWidth: 1)
-        }
+        .padding(15)
+        .softCard(radius: 18, tint: statusColor(for: preset))
     }
 
     private func batchAnswerField(

@@ -21,7 +21,8 @@ struct RequestHeaderProfilesView: View {
                 } label: {
                     Label("新增", systemImage: "plus")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
+                .tint(AppTheme.brand)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
@@ -29,10 +30,14 @@ struct RequestHeaderProfilesView: View {
             Divider()
 
             if store.requestHeaderProfiles.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "arrow.left.arrow.right.circle")
-                        .font(.system(size: 34, weight: .light))
-                        .foregroundStyle(.secondary)
+                VStack(spacing: 14) {
+                    GlassEffectContainer(spacing: 8) {
+                        Image(systemName: "arrow.left.arrow.right.circle")
+                            .font(.system(size: 32, weight: .regular))
+                            .foregroundStyle(AppTheme.brandGradient)
+                            .frame(width: 74, height: 74)
+                            .floatingGlass(radius: 24)
+                    }
                     Text("暂无请求头配置")
                         .font(.headline)
                     Text("新增配置后，可按网址为问卷主请求和页面内 fetch/XHR 设置请求头。")
@@ -43,7 +48,7 @@ struct RequestHeaderProfilesView: View {
                     Button("创建第一个配置") {
                         editingProfile = .newProfile
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.glass)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

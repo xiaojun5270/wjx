@@ -31,12 +31,17 @@ struct ContentView: View {
 
             HStack(spacing: 0) {
                 pageSidebar(isCompact: isCompact)
-                    .frame(width: isCompact ? compactWidth : 210)
-                Divider()
+                    .frame(width: isCompact ? compactWidth : AppTheme.railWidthRegular)
+                    .overlay(alignment: .trailing) {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.06))
+                            .frame(width: 1)
+                    }
                 pageStack()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .tint(AppTheme.brand)
         .alert(item: $workspaceNotice) { notice in
             Alert(
                 title: Text(notice.title),
@@ -91,18 +96,26 @@ struct ContentView: View {
     private func pageSidebar(isCompact: Bool) -> some View {
         VStack(spacing: 0) {
             if !isCompact {
-                HStack {
-                    Text("页面")
-                        .font(.title3.weight(.semibold))
-                    Spacer()
-                    Text("\(workspace.pages.count)")
-                        .font(.caption.monospacedDigit().weight(.medium))
-                        .foregroundStyle(.secondary)
+                GlassEffectContainer(spacing: 8) {
+                    HStack(spacing: 10) {
+                        GlassIconBadge(
+                            systemName: "rectangle.stack.fill",
+                            tone: .running,
+                            size: 30,
+                            useBrandGradient: true
+                        )
+                        Text("页面")
+                            .font(.headline)
+                        Spacer()
+                        CountChip(text: "\(workspace.pages.count)", tone: AppTheme.brand)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .floatingGlass(radius: 18)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-
-                Divider()
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
             }
 
             List {
@@ -141,20 +154,24 @@ struct ContentView: View {
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, 58)
 
-            Divider()
-            HStack {
-                Image(systemName: "rectangle.stack")
-                Text("\(workspace.pages.count) 个")
-                    .font(.caption.monospacedDigit())
-                if !isCompact { Spacer() }
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.stack")
+                    Text("\(workspace.pages.count) 个")
+                        .font(.caption.monospacedDigit())
+                    if !isCompact { Spacer() }
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: isCompact ? .center : .leading)
+                .padding(.horizontal, isCompact ? 8 : 12)
+                .padding(.vertical, 8)
+                .floatingGlass(radius: 14)
             }
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: isCompact ? .center : .leading)
-            .padding(.horizontal, isCompact ? 6 : 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, isCompact ? 6 : 10)
+            .padding(.vertical, 10)
         }
         .frame(maxHeight: .infinity)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(AppTheme.groupedBackground)
     }
 
     private func addPage() {
@@ -328,7 +345,9 @@ private struct ScheduledRefreshSheet: View {
                     Button(scheduler.targetDate == nil ? "启动定时刷新" : "更新定时刷新") {
                         scheduleRefresh()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassProminent)
+                    .tint(AppTheme.brand)
+                    .controlSize(.large)
                     .frame(maxWidth: .infinity)
                 } header: {
                     Text("设置刷新时间")
@@ -433,13 +452,13 @@ private struct SurveyPageSidebarRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(isCompact ? "页 \(page.pageNumber)" : page.title)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .foregroundStyle(isSelected ? AppTheme.brand : Color.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                     .allowsTightening(true)
                 Text(isCompact ? presetName : "\(presetName) · \(page.surveyURL?.host ?? "地址未设置")")
                     .font(isCompact ? .caption2 : .caption)
-                    .foregroundStyle(isSelected ? Color.accentColor.opacity(0.72) : Color.secondary)
+                    .foregroundStyle(isSelected ? AppTheme.brand.opacity(0.72) : Color.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                     .allowsTightening(true)
@@ -451,41 +470,41 @@ private struct SurveyPageSidebarRow: View {
             if isSelected && !isCompact {
                 Image(systemName: "chevron.right")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(AppTheme.brand)
             }
         }
         .padding(.horizontal, isCompact ? 6 : 11)
         .padding(.vertical, isCompact ? 7 : 8)
         .frame(minHeight: isCompact ? 54 : 58)
         .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(
                     isSelected
-                        ? Color.accentColor.opacity(0.15)
+                        ? AppTheme.brand.opacity(0.14)
                         : Color(uiColor: .secondarySystemGroupedBackground)
                 )
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
                     isSelected
-                        ? Color.accentColor.opacity(0.52)
+                        ? AppTheme.brand.opacity(0.55)
                         : Color.primary.opacity(0.07),
                     lineWidth: isSelected ? 1.2 : 0.6
                 )
         }
         .overlay(alignment: .leading) {
             Capsule()
-                .fill(Color.accentColor)
-                .frame(width: 3, height: isCompact ? 30 : 34)
+                .fill(AppTheme.brandGradient)
+                .frame(width: 3.5, height: isCompact ? 30 : 34)
                 .padding(.leading, 2)
                 .opacity(isSelected ? 1 : 0)
         }
         .shadow(
-            color: isSelected ? Color.accentColor.opacity(0.14) : Color.clear,
-            radius: 4,
+            color: isSelected ? AppTheme.brand.opacity(0.18) : Color.clear,
+            radius: 6,
             x: 0,
-            y: 2
+            y: 3
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -559,20 +578,20 @@ private struct SurveyPageView: View {
         NavigationStack {
             Group {
                 if let url = session.surveyURL {
-                    VStack(spacing: 0) {
+                    SurveyWebView(
+                        controller: webController,
+                        url: url,
+                        rules: selectedPreset?.rules ?? [],
+                        autoFillOnLoad: session.autoFillOnLoad,
+                        autoSubmitAfterFill: session.autoSubmitAfterFill,
+                        submitDelaySeconds: session.submitDelaySeconds,
+                        isSelected: isSelected,
+                        initialLoadDelaySeconds: 0,
+                        requestHeaderProfiles: store.requestHeaderProfiles
+                    )
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .safeAreaInset(edge: .top, spacing: 0) {
                         statusHeader
-                        Divider()
-                        SurveyWebView(
-                            controller: webController,
-                            url: url,
-                            rules: selectedPreset?.rules ?? [],
-                            autoFillOnLoad: session.autoFillOnLoad,
-                            autoSubmitAfterFill: session.autoSubmitAfterFill,
-                            submitDelaySeconds: session.submitDelaySeconds,
-                            isSelected: isSelected,
-                            initialLoadDelaySeconds: 0,
-                            requestHeaderProfiles: store.requestHeaderProfiles
-                        )
                     }
                 } else {
                     invalidURLView
@@ -625,25 +644,24 @@ private struct SurveyPageView: View {
     }
 
     private var nextPageBar: some View {
-        VStack(spacing: 0) {
-            Divider()
+        GlassEffectContainer(spacing: 10) {
             Button(action: onNextPage) {
                 HStack(spacing: 8) {
                     Text("下一页")
                     Image(systemName: "chevron.right")
                 }
                 .font(.headline)
-                .frame(maxWidth: 280)
-                .frame(height: 46)
+                .frame(maxWidth: 300)
+                .frame(height: 50)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.glassProminent)
+            .tint(AppTheme.brand)
             .disabled(!hasNextPage)
             .help(hasNextPage ? "打开下一页" : "已经是最后一页")
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
         }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial)
     }
 
     private var visibleNoticeBinding: Binding<UserNotice?> {
@@ -676,7 +694,7 @@ private struct SurveyPageView: View {
 
             Button(action: onShowScheduledRefresh) {
                 Image(systemName: isScheduledRefreshActive ? "clock.fill" : "clock")
-                    .foregroundStyle(isScheduledRefreshActive ? Color.orange : Color.accentColor)
+                    .foregroundStyle(isScheduledRefreshActive ? Color.orange : AppTheme.brand)
             }
             .accessibilityLabel(isScheduledRefreshActive ? "查看定时刷新" : "设置定时刷新")
             .help("设置到点刷新所有页面")
@@ -690,56 +708,74 @@ private struct SurveyPageView: View {
     }
 
     private var statusHeader: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 11) {
-                ZStack {
-                    Circle()
-                        .fill(statusColor.opacity(0.14))
-                    Image(systemName: statusIcon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(statusColor)
-                }
-                .frame(width: 32, height: 32)
+        GlassEffectContainer(spacing: 10) {
+            VStack(spacing: 9) {
+                HStack(spacing: 11) {
+                    GlassIconBadge(systemName: statusIcon, tone: statusTone, size: 34)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(statusTitle)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(statusDetail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(statusTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Text(statusDetail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
 
-                Spacer(minLength: 8)
+                    Spacer(minLength: 8)
 
-                if webController.isFilling || webController.isWaitingToSubmit ||
-                    webController.isSubmitting || webController.isQueueRunning {
-                    ProgressView()
-                        .controlSize(.small)
-                } else if case .ready(let count) = webController.state {
-                    Text("\(count) 题")
-                        .font(.caption.monospacedDigit().weight(.medium))
-                        .foregroundStyle(.secondary)
+                    if webController.isFilling || webController.isWaitingToSubmit ||
+                        webController.isSubmitting || webController.isQueueRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if case .ready(let count) = webController.state {
+                        CountChip(text: "\(count) 题", tone: statusColor)
+                    }
+
+                    pageOptionsMenu
                 }
 
-                pageOptionsMenu
-            }
+                if webController.isQueueRunning {
+                    ProgressView(value: webController.queueSnapshot.progress)
+                        .tint(statusColor)
+                }
 
-            if webController.isQueueRunning {
-                ProgressView(value: webController.queueSnapshot.progress)
-                    .tint(statusColor)
+                if webController.isAwaitingCaptchaCompletion {
+                    captchaHandoffBanner
+                }
             }
-
-            if webController.isAwaitingCaptchaCompletion {
-                captchaHandoffBanner
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .floatingGlass(radius: AppTheme.cardRadius)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
         .frame(maxWidth: .infinity)
-        .background(Color(uiColor: .systemBackground))
         .animation(.easeInOut(duration: 0.2), value: webController.queueSnapshot.progress)
+    }
+
+    private var statusTone: StatusTone {
+        if webController.scheduledBatchTarget != nil { return .waiting }
+        if webController.isScheduledBatchRefreshing { return .running }
+        if webController.isBatchReadyToSubmit { return .success }
+        if webController.isQueueRunning || webController.isFilling ||
+            webController.isWaitingToSubmit || webController.isSubmitting {
+            return .running
+        }
+        switch webController.queueState {
+        case .completed:
+            return webController.queueSnapshot.failed == 0 ? .success : .warning
+        case .stopped: return .warning
+        case .idle, .running: break
+        }
+        switch webController.state {
+        case .loading: return .idle
+        case .ready, .submitted: return .success
+        case .closed, .failed: return .danger
+        case .captchaRequired: return .warning
+        }
     }
 
     private var pageOptionsMenu: some View {
@@ -793,10 +829,14 @@ private struct SurveyPageView: View {
     }
 
     private var invalidURLView: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "link.badge.plus")
-                .font(.system(size: 38, weight: .light))
-                .foregroundStyle(.secondary)
+        VStack(spacing: 16) {
+            GlassEffectContainer(spacing: 8) {
+                Image(systemName: "link.badge.plus")
+                    .font(.system(size: 34, weight: .regular))
+                    .foregroundStyle(AppTheme.brandGradient)
+                    .frame(width: 78, height: 78)
+                    .floatingGlass(radius: 26)
+            }
             Text("问卷地址无效")
                 .font(.headline)
             Text("请输入 wjx.cn 的 HTTPS 问卷地址")
@@ -806,12 +846,15 @@ private struct SurveyPageView: View {
                 showingRules = true
             } label: {
                 Label("打开设置", systemImage: "slider.horizontal.3")
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.glassProminent)
+            .tint(AppTheme.brand)
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(AppTheme.groupedBackground)
     }
 
     private var selectedPreset: SubmissionPreset? {
@@ -1059,14 +1102,19 @@ private struct AutomationLogView: View {
     }
 
     private var logSummary: some View {
-        HStack(spacing: 0) {
-            summaryMetric("总计", count: controller.logs.count, color: .primary)
-            summaryMetric("成功", count: count(for: .success), color: .green)
-            summaryMetric("警告", count: count(for: .warning), color: .orange)
-            summaryMetric("失败", count: count(for: .error), color: .red)
+        GlassEffectContainer(spacing: 8) {
+            HStack(spacing: 0) {
+                summaryMetric("总计", count: controller.logs.count, color: .primary)
+                summaryMetric("成功", count: count(for: .success), color: .green)
+                summaryMetric("警告", count: count(for: .warning), color: .orange)
+                summaryMetric("失败", count: count(for: .error), color: .red)
+            }
+            .padding(.vertical, 12)
+            .floatingGlass(radius: 18)
         }
-        .padding(.vertical, 11)
-        .background(Color(uiColor: .secondarySystemBackground))
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
     }
 
     private func summaryMetric(_ title: String, count: Int, color: Color) -> some View {
