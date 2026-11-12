@@ -29,11 +29,19 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        testRelease {
+            storeFile = file("wjx-test-release.keystore")
+            storePassword = "wjxautofill"
+            keyAlias = "wjxautofill"
+            keyPassword = "wjxautofill"
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.debug
+            // Fixed test-distribution signing key. Replace before store release.
+            signingConfig = signingConfigs.testRelease
         }
     }
 }

@@ -36,29 +36,6 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Restore Android test signing key
-        id: android-signing-key
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: wjx-android-debug-keystore-v1
-
-      - name: Create Android test signing key
-        if: steps.android-signing-key.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.android"
-          keytool -genkeypair \
-            -keystore "$HOME/.android/debug.keystore" \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -dname "CN=WJX Auto Fill Test,O=xiaojun5270,C=CN" \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000
-
       - name: Install dependencies
         run: flutter pub get
 
