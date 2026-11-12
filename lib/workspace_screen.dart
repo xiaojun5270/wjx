@@ -507,9 +507,6 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
   @override
   Widget build(BuildContext context) {
     final validUri = widget.store.validatedSurveyUri(widget.page.surveyUrl);
-    final pageIndex =
-        widget.store.pages.indexWhere((item) => item.id == widget.page.id);
-    final hasNext = pageIndex >= 0 && pageIndex < widget.store.pages.length - 1;
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) => Scaffold(
@@ -576,33 +573,6 @@ class _SurveyPagePaneState extends State<SurveyPagePane> {
                   ),
                 ],
               ),
-        bottomNavigationBar: Container(
-          decoration: const BoxDecoration(
-            color: Color(0xF5FFFFFF),
-            border: Border(top: BorderSide(color: Color(0xFFD1D1D6))),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: SafeArea(
-            top: false,
-            child: Align(
-              alignment: Alignment.center,
-              heightFactor: 1,
-              child: SizedBox(
-                width: 280,
-                height: 46,
-                child: FilledButton.icon(
-                  onPressed: hasNext ? widget.store.selectNextPage : null,
-                  iconAlignment: IconAlignment.end,
-                  icon: const Icon(Icons.chevron_right, size: 20),
-                  label: const Text(
-                    '下一页',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }

@@ -29,7 +29,7 @@ void main() {
       tester.getSize(find.byKey(const ValueKey('page-sidebar'))).width,
       closeTo(85.8, .1),
     );
-    expect(tester.getRect(find.text('下一页')).center.dy, greaterThan(760));
+    expect(find.text('下一页'), findsNothing);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.byKey(const ValueKey('sidebar-settings')));
